@@ -1,0 +1,1626 @@
+<!DOCTYPE html>
+<!--
+  Standalone Verilog simulator and schematic viewer. Double-click this file; no server and no install.
+  The schematic interaction (gate symbols, hierarchy, trace-to-driver, hollow pins)
+  follows naja-schematic: https://github.com/keplertech/naja-schematic
+  Engine: Icarus Verilog 14.0 (devel), commit c7530db, compiled to WebAssembly by VeriSim.
+  https://github.com/senolgulgonul/verisim
+  https://senolgulgonul.github.io/verisim/
+  Icarus Verilog is GPL-2.0-or-later (Stephen Williams and contributors).
+  The embedded ivlpp / ivl / vvp modules are derivative works and stay under that license.
+  https://github.com/steveicarus/iverilog
+  https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verilog Schematic</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #eef0f3;
+    --bar: #f7f8fa;
+    --panel: #ffffff;
+    --line: #d4d9e0;
+    --text: #15191f;
+    --muted: #677083;
+    --faint: #8b95a3;
+    --accent: #1d6fe0;
+    --accent-ink: #ffffff;
+    --good: #137a3e;
+    --bad: #d23730;
+    --warn: #b26a00;
+    --wave: #15191f;
+    --cursor: #1d6fe0;
+    --mono: Consolas, "Cascadia Mono", "Segoe UI Mono", ui-monospace, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 14px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; flex-direction: column; gap: 1px; flex: none; }
+  .brand b { font-family: var(--mono); font-size: 15px; font-weight: 650; letter-spacing: 0.2px; white-space: nowrap; }
+  .brand small { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .spacer { flex: 1; }
+  select, button { font-family: var(--mono); font-size: 12.5px; }
+  select {
+    background: #fff;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 8px;
+  }
+  #run {
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+    border: none;
+    border-radius: 6px;
+    padding: 7px 16px;
+    cursor: pointer;
+  }
+  #run:disabled { opacity: 0.55; cursor: default; }
+  #run:hover:not(:disabled) { filter: brightness(1.08); }
+  #toSch {
+    background: #fff;
+    color: var(--accent);
+    font-weight: 700;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  #toSch:hover { background: #eef5ff; }
+  main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .filebar {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    padding: 8px 10px 0;
+    background: var(--bar);
+    border-bottom: 1px solid var(--line);
+  }
+  .ftab {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: none;
+    border-radius: 7px 7px 0 0;
+    padding: 7px 14px 8px;
+    cursor: pointer;
+  }
+  .ftab.on {
+    color: var(--text);
+    background: var(--panel);
+    border-color: var(--line);
+    font-weight: 650;
+  }
+  .filebar .grow { flex: 1; }
+  .mini {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 4px 9px;
+    cursor: pointer;
+    margin-bottom: 6px;
+  }
+  .mini:hover { color: var(--text); border-color: var(--accent); }
+  .editors { flex: 1; min-height: 0; position: relative; background: var(--panel); }
+  textarea.editor {
+    display: none;
+    width: 100%;
+    height: 100%;
+    border: none;
+    resize: none;
+    outline: none;
+    background: var(--panel);
+    color: var(--text);
+    padding: 12px 14px 16px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.55;
+    tab-size: 2;
+  }
+  textarea.editor.on { display: block; }
+  #vsplit {
+    height: 7px;
+    background: var(--line);
+    cursor: row-resize;
+    flex: none;
+  }
+  #vsplit:hover { background: var(--accent); }
+  #bottom {
+    height: 42%;
+    min-height: 120px;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-top: 1px solid var(--line);
+  }
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 8px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--line);
+  }
+  .tab {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  .tab.on { color: var(--text); border-bottom-color: var(--accent); }
+  .tabs .stat { font-family: var(--mono); font-size: 12px; color: var(--muted); padding-right: 8px; }
+  .tabs .stat b { color: var(--good); font-weight: 650; }
+  .tabs a.act { font-family: var(--mono); font-size: 12px; color: var(--accent); cursor: pointer; padding: 0 8px; }
+  .view { flex: 1; min-height: 0; display: none; overflow: auto; }
+  .view.on { display: block; }
+  #wave.on { display: flex; overflow: hidden; }
+  #console {
+    margin: 0;
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  #console .l-err { color: var(--bad); }
+  #console .l-warn { color: var(--warn); }
+  #console .l-sys { color: var(--muted); }
+  #siglist {
+    width: 220px;
+    flex: none;
+    overflow: auto;
+    border-right: 1px solid var(--line);
+    background: #fafbfc;
+    font-family: var(--mono);
+    font-size: 12px;
+    display: none;
+  }
+  #siglist .sl-head {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 10px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: #fafbfc;
+  }
+  #siglist .sl-head a { color: var(--accent); cursor: pointer; }
+  #siglist label { display: flex; gap: 7px; align-items: center; padding: 3px 10px; cursor: pointer; }
+  #siglist label:hover { background: #f0f2f5; }
+  #wavecol { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #wtools {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bar);
+  }
+  #wtools button {
+    background: #fff;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  #wtools .hint { color: var(--faint); font-family: var(--mono); font-size: 11px; }
+  #wmarker { color: var(--text); font-family: var(--mono); font-size: 12px; font-weight: 650; }
+  #wavearea { flex: 1; overflow: auto; position: relative; }
+  #wavearea .empty, #console .empty { color: var(--muted); font-family: var(--mono); font-size: 13px; padding: 14px; }
+  #wavearea svg text { font-family: var(--mono); }
+  #schem.on { display: flex; overflow: hidden; }
+  #stree {
+    width: 230px;
+    flex: none;
+    overflow: auto;
+    border-right: 1px solid var(--line);
+    background: #fafbfc;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  #stree .sl-head {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 10px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: #fafbfc;
+  }
+  #stree .tg { padding: 8px 10px 2px; color: var(--faint); font-size: 10px; letter-spacing: 0.08em; }
+  #stree .ti { padding: 3px 10px 3px 16px; cursor: pointer; white-space: nowrap; }
+  #stree .ti em { color: var(--faint); font-style: normal; }
+  #stree .ti:hover, #stree .ti.on { background: #eef5ff; }
+  #schemcol { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #stools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bar);
+    flex-wrap: wrap;
+  }
+  #stools button, #stools select {
+    background: #fff;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  #stools .hint { color: var(--faint); font-family: var(--mono); font-size: 11px; }
+  #scrumb { display: flex; gap: 4px; align-items: center; font-family: var(--mono); font-size: 12px; }
+  #scrumb button { border: none; background: transparent; color: var(--accent); padding: 0 2px; }
+  #swarn { color: var(--warn); font-family: var(--mono); font-size: 11px; padding: 4px 10px; background: #fff8ec; border-bottom: 1px solid var(--line); }
+  #sprop { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 0 4px; }
+  #scanvas { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #fbfcfe; cursor: grab; }
+  #scanvas.panning { cursor: grabbing; }
+  #scanvas svg { display: block; width: 100%; height: 100%; }
+  #scanvas svg text { font-family: var(--mono); }
+  #scanvas .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+  .tab.dirty::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--warn); vertical-align: middle; }
+  #smenu {
+    position: fixed;
+    z-index: 30;
+    min-width: 180px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(20, 28, 40, 0.12);
+    padding: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  #smenu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 6px 10px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  #smenu button:hover { background: #eef5ff; }
+  #shelp {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    width: 320px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    box-shadow: 0 8px 24px rgba(20, 28, 40, 0.12);
+    z-index: 5;
+  }
+  #shelp b { display: block; margin-bottom: 6px; }
+  #shelp p { margin: 0 0 6px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <b>Verilog Schematic</b>
+    <small>Verilog tab · Icarus simulator · schematic view</small>
+  </div>
+  <div class="spacer"></div>
+  <select id="examples" title="Load an example">
+    <option value="">Examples…</option>
+    <option value="gate">Gate-level half adder</option>
+    <option value="dataflow">Dataflow half adder</option>
+    <option value="behavioral">Behavioral half adder</option>
+    <option value="shiftreg">4-bit shift register</option>
+    <option value="counter2">2-bit counter</option>
+    <option value="mux">2-to-1 mux</option>
+    <option value="hier">Full adder (hierarchy)</option>
+  </select>
+  <select id="gen" title="Language generation passed to iverilog -g">
+    <option value="2005" selected>Verilog-2005</option>
+    <option value="2009">Verilog-2009</option>
+    <option value="2012">SystemVerilog-2012</option>
+  </select>
+  <button id="toSch" type="button" title="Draw the Verilog tab as a schematic">Schematic</button>
+  <button id="run" title="Compile and simulate (Ctrl+Enter)">&#9658; Run</button>
+</header>
+<main>
+  <div class="filebar">
+    <button class="ftab on" data-file="design" type="button">Verilog</button>
+    <button class="ftab" data-file="tb" type="button">Testbench</button>
+    <span class="grow"></span>
+    <button class="mini" id="fOpen" type="button">Open</button>
+    <button class="mini" id="fSave" type="button">Save</button>
+    <button class="mini" id="fClear" type="button">Clear</button>
+  </div>
+  <div class="editors">
+    <textarea id="design" class="editor on" spellcheck="false"></textarea>
+    <textarea id="tb" class="editor" spellcheck="false"></textarea>
+  </div>
+</main>
+<div id="vsplit" title="Drag to resize"></div>
+<div id="bottom">
+  <div class="tabs">
+    <div class="tab on" data-v="console">Console</div>
+    <div class="tab" data-v="wave">Waveform</div>
+    <div class="tab" id="stab" data-v="schem">Schematic</div>
+    <div class="spacer"></div>
+    <a class="act" id="dlsvg" style="display:none" title="Download the current waveform view as SVG">&#8595; waveform.svg</a>
+    <a class="act" id="dlvcd" style="display:none">&#8595; dump.vcd</a>
+    <div class="stat" id="stat">engine idle</div>
+  </div>
+  <pre id="console" class="view on"></pre>
+  <div id="wave" class="view">
+    <aside id="siglist"></aside>
+    <div id="wavecol">
+      <div id="wtools">
+        <button id="wfit" type="button">Fit</button>
+        <span class="hint">scroll = zoom · drag = pan · click = cursor</span>
+        <span id="wmarker"></span>
+        <span class="hint" id="wrange"></span>
+      </div>
+      <div id="wavearea"><div class="empty">Run a simulation to see waveforms.</div></div>
+    </div>
+  </div>
+  <div id="schem" class="view">
+    <aside id="stree"></aside>
+    <div id="schemcol">
+      <div id="stools">
+        <span id="scrumb"></span>
+        <select id="smod" title="Module to draw"></select>
+        <button id="sfit" type="button">Fit</button>
+        <button id="szin" type="button" title="Zoom in">+</button>
+        <button id="szout" type="button" title="Zoom out">−</button>
+        <button id="sexplore" type="button" title="Grow the schematic from one instance, the way naja-schematic does">Explore</button>
+        <button id="strace" type="button">Trace</button>
+        <button id="sclear" type="button">Clear</button>
+        <button id="ssvg" type="button">Export SVG</button>
+        <button id="shelpb" type="button">Help</button>
+        <span class="hint" id="sprop"></span>
+      </div>
+      <div id="swarn" style="display:none"></div>
+      <div id="scanvas"><div class="empty">Open Schematic to draw the Verilog tab.</div></div>
+    </div>
+  </div>
+</div>
+<div id="smenu" style="display:none"></div>
+
+<script type="text/plain" id="eng-ivlpp-js">@@IVLPP_JS@@</script>
+<script type="text/plain" id="eng-ivlpp-wasm">@@IVLPP_WASM@@</script>
+<script type="text/plain" id="eng-ivl-js">@@IVL_JS@@</script>
+<script type="text/plain" id="eng-ivl-wasm">@@IVL_WASM@@</script>
+<script type="text/plain" id="eng-vvp-js">@@VVP_JS@@</script>
+<script type="text/plain" id="eng-vvp-wasm">@@VVP_WASM@@</script>
+<script>
+@@SCHEMATIC_JS@@
+</script>
+
+<script>
+const $ = s => document.querySelector(s);
+const designEl = $('#design');
+const tbEl = $('#tb');
+
+const HA_TB = title => `\`timescale 1ns/1ps
+module tb;
+  reg a, b;
+  wire sum, carry;
+
+  half_adder dut(.a(a), .b(b), .s(sum), .c(carry));
+
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    $display("=== half adder: ${title} ===");
+    $monitor("t=%0d ns  a=%b b=%b  sum=%b carry=%b", $time, a, b, sum, carry);
+    a = 0; b = 0;
+    #10 a = 0; b = 1;
+    #10 a = 1; b = 0;
+    #10 a = 1; b = 1;
+    #10 $finish;
+  end
+endmodule
+`;
+
+const EXAMPLES = {
+  gate: {
+    design: `\`timescale 1ns/1ps
+module half_adder(input a, input b, output s, output c);
+  xor (s, a, b);
+  and (c, a, b);
+endmodule
+`,
+    tb: HA_TB('gate-level')
+  },
+  dataflow: {
+    design: `\`timescale 1ns/1ps
+module half_adder(input a, input b, output s, output c);
+  assign s = a ^ b;
+  assign c = a & b;
+endmodule
+`,
+    tb: HA_TB('dataflow')
+  },
+  behavioral: {
+    design: `\`timescale 1ns/1ps
+module half_adder(input a, input b, output reg s, output reg c);
+  always @(*) begin
+    s = a ^ b;
+    c = a & b;
+  end
+endmodule
+`,
+    tb: HA_TB('behavioral')
+  },
+  shiftreg: {
+    design: `\`timescale 1ns/1ps
+module shiftreg(
+  input wire clk, input wire rst, input wire din,
+  output reg q0, output reg q1, output reg q2, output reg q3
+);
+  always @(posedge clk or posedge rst) begin
+    if (rst) begin
+      q0 <= 0; q1 <= 0; q2 <= 0; q3 <= 0;
+    end else begin
+      q0 <= din; q1 <= q0; q2 <= q1; q3 <= q2;
+    end
+  end
+endmodule
+`,
+    tb: `\`timescale 1ns/1ps
+module tb;
+  reg clk = 0, rst = 1, din = 0;
+  wire q0, q1, q2, q3;
+  shiftreg dut(.clk(clk), .rst(rst), .din(din), .q0(q0), .q1(q1), .q2(q2), .q3(q3));
+  always #5 clk = ~clk;
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    $display(" t din q3q2q1q0");
+    $monitor("%3d  %b   %b%b%b%b", $time, din, q3, q2, q1, q0);
+    #12 rst = 0;
+    din = 1; #10 din = 0; #10 din = 1; #10 din = 1; #10 din = 0;
+    #40 $finish;
+  end
+endmodule
+`
+  },
+  counter2: {
+    design: `\`timescale 1ns/1ps
+module counter2(input wire clk, input wire rst, output reg q0, output reg q1);
+  always @(posedge clk or posedge rst) begin
+    if (rst) {q1, q0} <= 2'b00;
+    else     {q1, q0} <= {q1, q0} + 2'b01;
+  end
+endmodule
+`,
+    tb: `\`timescale 1ns/1ps
+module tb;
+  reg clk = 0, rst = 1;
+  wire q0, q1;
+  counter2 dut(.clk(clk), .rst(rst), .q0(q0), .q1(q1));
+  always #5 clk = ~clk;
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    $display(" t q1q0");
+    $monitor("%3d  %b%b", $time, q1, q0);
+    #12 rst = 0;
+    #80 $finish;
+  end
+endmodule
+`
+  },
+  mux: {
+    design: `\`timescale 1ns/1ps
+module mux2(input a, input b, input sel, output y);
+  assign y = sel ? b : a;
+endmodule
+`,
+    tb: `\`timescale 1ns/1ps
+module tb;
+  reg a, b, sel;
+  wire y;
+  mux2 dut(.a(a), .b(b), .sel(sel), .y(y));
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    $display("sel a b y");
+    $monitor(" %b  %b %b %b", sel, a, b, y);
+    a = 0; b = 1; sel = 0;
+    #10 sel = 1;
+    #10 a = 1;
+    #10 b = 0;
+    #10 $finish;
+  end
+endmodule
+`
+  },
+  hier: {
+    design: `\`timescale 1ns/1ps
+module half_adder(input a, input b, output s, output c);
+  xor (s, a, b);
+  and (c, a, b);
+endmodule
+
+module full_adder(input a, input b, input cin, output sum, output cout);
+  wire s1, c1, c2;
+  half_adder ha1(.a(a), .b(b), .s(s1), .c(c1));
+  half_adder ha2(.a(s1), .b(cin), .s(sum), .c(c2));
+  or (cout, c1, c2);
+endmodule
+`,
+    tb: `\`timescale 1ns/1ps
+module tb;
+  reg a, b, cin;
+  wire sum, cout;
+  full_adder dut(.a(a), .b(b), .cin(cin), .sum(sum), .cout(cout));
+  integer i;
+  initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb);
+    $display("a b cin | sum cout");
+    for (i = 0; i < 8; i = i + 1) begin
+      {a, b, cin} = i;
+      #10 $display("%b %b  %b  |  %b    %b", a, b, cin, sum, cout);
+    end
+    $finish;
+  end
+endmodule
+`
+  }
+};
+
+function sanitize(s) {
+  return String(s || '')
+    .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"');
+}
+
+let activeFile = 'design';
+function activeEl() { return activeFile === 'tb' ? tbEl : designEl; }
+function showFile(which) {
+  activeFile = which;
+  designEl.classList.toggle('on', which === 'design');
+  tbEl.classList.toggle('on', which === 'tb');
+  document.querySelectorAll('.ftab').forEach(t => t.classList.toggle('on', t.dataset.file === which));
+  activeEl().focus();
+}
+document.querySelectorAll('.ftab').forEach(t => t.onclick = () => showFile(t.dataset.file));
+
+function loadPair(design, tb) {
+  designEl.value = design;
+  tbEl.value = tb;
+  saveLocal();
+}
+function saveLocal() {
+  try {
+    localStorage.setItem('vsch-design', designEl.value);
+    localStorage.setItem('vsch-tb', tbEl.value);
+    localStorage.setItem('vsch-gen', $('#gen').value);
+  } catch (e) {}
+}
+(function initEditors() {
+  let d = null, t = null, g = null;
+  try {
+    d = localStorage.getItem('vsch-design');
+    t = localStorage.getItem('vsch-tb');
+    g = localStorage.getItem('vsch-gen');
+  } catch (e) {}
+  if (d == null && t == null) loadPair(EXAMPLES.gate.design, EXAMPLES.gate.tb);
+  else {
+    designEl.value = d || '';
+    tbEl.value = t || '';
+  }
+  if (g) $('#gen').value = g;
+})();
+designEl.addEventListener('input', saveLocal);
+tbEl.addEventListener('input', saveLocal);
+$('#gen').addEventListener('change', saveLocal);
+document.querySelectorAll('textarea.editor').forEach(el => {
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const s = el.selectionStart, n = el.selectionEnd;
+      el.value = el.value.slice(0, s) + '  ' + el.value.slice(n);
+      el.selectionStart = el.selectionEnd = s + 2;
+      saveLocal();
+    }
+  });
+});
+
+$('#examples').onchange = e => {
+  const v = e.target.value;
+  e.target.value = '';
+  if (!EXAMPLES[v]) return;
+  loadPair(EXAMPLES[v].design, EXAMPLES[v].tb);
+};
+
+$('#fOpen').onclick = () => {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.v,.sv,.vh,.txt,text/plain';
+  inp.onchange = () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => { activeEl().value = String(r.result); saveLocal(); };
+    r.readAsText(f);
+  };
+  inp.click();
+};
+$('#fSave').onclick = () => {
+  const name = activeFile === 'tb' ? 'testbench.v' : 'design.v';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([activeEl().value], { type: 'text/plain' }));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('#fClear').onclick = () => {
+  const el = activeEl();
+  if (el.value.trim() && !confirm('Clear the ' + (activeFile === 'tb' ? 'testbench' : 'Verilog') + ' editor?')) return;
+  el.value = '';
+  saveLocal();
+};
+
+const con = $('#console');
+function clearCon() { con.textContent = ''; }
+function log(t, cls) {
+  if (!t) return;
+  const s = document.createElement('span');
+  s.className = 'l-' + (cls || 'out');
+  s.textContent = String(t).replace(/\s+$/, '') + '\n';
+  con.appendChild(s);
+  con.scrollTop = con.scrollHeight;
+}
+function status(t, ok) { $('#stat').innerHTML = ok ? '<b>' + t + '</b>' : t; }
+
+function b64ToU8(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+const factories = {};
+function loadFactory(name) {
+  if (factories[name]) return factories[name];
+  const js = new TextDecoder().decode(b64ToU8($('#eng-' + name + '-js').textContent.replace(/\s+/g, '')));
+  const wasm = b64ToU8($('#eng-' + name + '-wasm').textContent.replace(/\s+/g, ''));
+  const url = URL.createObjectURL(new Blob([js], { type: 'text/javascript' }));
+  factories[name] = import(url).then(mod => {
+    return opts => mod.default(Object.assign({
+      wasmBinary: wasm.slice(),
+      locateFile: () => 'embedded.wasm'
+    }, opts));
+  });
+  return factories[name];
+}
+function preload() {
+  return Promise.all(['ivlpp', 'ivl', 'vvp'].map(loadFactory));
+}
+setTimeout(() => { preload().catch(() => {}); }, 60);
+
+const ivlConf = g => `basedir:/
+module:system.vpi
+generation:${g}
+generation:no-specify
+out:/out.vvp
+iwidth:32
+widthcap:65536
+functor:cprop
+functor:nodangle
+flag:DLL=vvp.tgt
+`;
+
+async function preprocessAll(files) {
+  const code = [], err = [];
+  const init = await loadFactory('ivlpp');
+  const m = await init({ print: s => code.push(s), printErr: s => err.push(s) });
+  const args = ['-L'];
+  for (const f of files) {
+    const src = f.src.endsWith('\n') ? f.src : f.src + '\n';
+    m.FS.writeFile('/' + f.name, src);
+    args.push('/' + f.name);
+  }
+  m.callMain(args);
+  return { text: code.join('\n') + '\n', err: err.join('\n') };
+}
+async function compile(srcText, g) {
+  const err = [];
+  const init = await loadFactory('ivl');
+  const m = await init({ print: () => {}, printErr: s => err.push(s) });
+  m.FS.writeFile('/ivl.conf', ivlConf(g));
+  m.FS.writeFile('/src.v', srcText);
+  m.callMain(['-C/ivl.conf', '--', '/src.v']);
+  let vvp = null;
+  try { vvp = m.FS.readFile('/out.vvp'); } catch (e) {}
+  return { vvp, err: err.join('\n') };
+}
+async function simulate(bytes) {
+  const out = [];
+  const init = await loadFactory('vvp');
+  const m = await init({ print: s => out.push(s), printErr: s => out.push(s) });
+  m.FS.writeFile('/sim.vvp', bytes);
+  m.callMain(['/sim.vvp']);
+  let vcd = null;
+  try { vcd = m.FS.readFile('/dump.vcd', { encoding: 'utf8' }); } catch (e) {}
+  if (!vcd) {
+    try {
+      const names = m.FS.readdir('/').filter(n => /\.vcd$/i.test(n));
+      if (names.length) vcd = m.FS.readFile('/' + names[0], { encoding: 'utf8' });
+    } catch (e) {}
+  }
+  return { out: out.join('\n'), vcd };
+}
+
+const NOISE = /system\.vpi|dynamic linking not enabled/;
+let lastVCD = null;
+async function run() {
+  const b = $('#run');
+  b.disabled = true;
+  clearCon();
+  $('#dlvcd').style.display = 'none';
+  $('#dlsvg').style.display = 'none';
+  const prevNames = WD ? selOrder.map(id => WD.vars[id] && WD.vars[id].name).filter(Boolean) : null;
+  curT = null; view0 = 0; viewSpan = null;
+  const g = $('#gen').value;
+  try {
+    status('loading Icarus…');
+    await preload();
+    const d0 = designEl.value, t0 = tbEl.value;
+    const d = sanitize(d0), t = sanitize(t0);
+    log('$ iverilog -g' + g + ' -o out.vvp design.v testbench.v', 'sys');
+    log('$ vvp out.vvp', 'sys');
+    if (d !== d0 || t !== t0) log('Normalized non-breaking spaces or smart quotes in the pasted source.', 'sys');
+    status('preprocessing…');
+    const pp = await preprocessAll([{ name: 'design.v', src: d }, { name: 'testbench.v', src: t }]);
+    if (pp.err.trim()) log(pp.err, 'warn');
+    status('compiling…');
+    const c = await compile(pp.text, g);
+    if (!c.vvp) {
+      const e = c.err.split('\n').filter(l => !NOISE.test(l)).join('\n');
+      log(e || 'Compilation failed.', 'err');
+      status('compile error');
+      show('console');
+      return;
+    }
+    const warn = c.err.split('\n').filter(l => !NOISE.test(l)).join('\n');
+    if (warn.trim()) log(warn, 'warn');
+    status('simulating…');
+    const s = await simulate(c.vvp);
+    log(s.out.trim() ? s.out : '(no console output)', s.out.trim() ? 'out' : 'sys');
+    if (s.vcd) {
+      lastVCD = s.vcd;
+      WD = parseVCD(s.vcd);
+      const byName = {};
+      for (const id of WD.order) byName[WD.vars[id].name] = id;
+      if (prevNames && prevNames.length) selOrder = prevNames.map(n => byName[n]).filter(Boolean);
+      else selOrder = WD.order.slice();
+      buildSigList();
+      renderWave();
+      $('#dlvcd').style.display = 'inline';
+      $('#dlsvg').style.display = 'inline';
+      show('wave');
+    } else {
+      WD = null; selOrder = []; lastVCD = null;
+      $('#siglist').style.display = 'none';
+      $('#wavearea').innerHTML = '<div class="empty">No waveform. Add $dumpfile("dump.vcd"); and $dumpvars(0, tb); to the testbench.</div>';
+      show('console');
+    }
+    status('done', true);
+  } catch (e) {
+    log('Engine error: ' + ((e && e.message) || e), 'err');
+    status('error');
+    show('console');
+  } finally {
+    b.disabled = false;
+  }
+}
+
+function show(v) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.v === v));
+  document.querySelectorAll('.view').forEach(x => x.classList.remove('on'));
+  const id = v === 'wave' ? 'wave' : v === 'schem' ? 'schem' : 'console';
+  $('#' + id).classList.add('on');
+  if (v === 'wave' && WD) renderWave();
+  if (v === 'schem') {
+    const bottom = $('#bottom');
+    if (bottom.clientHeight < 280) bottom.style.height = '58%';
+    if (SCH) renderSchem(VIEW.needFit);
+    VIEW.needFit = false;
+  }
+}
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  if (t.dataset.v === 'schem') { openSchematic(false); return; }
+  show(t.dataset.v);
+});
+$('#run').onclick = run;
+$('#toSch').onclick = () => openSchematic(true);
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); run(); return; }
+  const typing = e.target && (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT');
+  if (typing || !$('#schem').classList.contains('on')) return;
+  if (e.key === '0' || e.key === 'Home') { e.preventDefault(); renderSchem(true); }
+  else if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomSchem(1.15); }
+  else if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomSchem(1 / 1.15); }
+  else if (e.key === 'w' || e.key === 'W') { VIEW.panY += 40; renderSchem(false); }
+  else if (e.key === 's' || e.key === 'S') { VIEW.panY -= 40; renderSchem(false); }
+  else if (e.key === 'a' || e.key === 'A') { VIEW.panX += 40; renderSchem(false); }
+  else if (e.key === 'd' || e.key === 'D') { VIEW.panX -= 40; renderSchem(false); }
+  else if (e.key === 'Escape') hideMenu();
+});
+function downloadBlob(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+$('#dlvcd').onclick = () => {
+  if (!lastVCD) return;
+  downloadBlob('dump.vcd', new Blob([lastVCD], { type: 'text/plain' }));
+};
+function waveformSvgText() {
+  const svg = waveArea.querySelector('svg');
+  if (!svg) return null;
+  const NS = 'http://www.w3.org/2000/svg';
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns', NS);
+  const wave = (getComputedStyle(document.documentElement).getPropertyValue('--wave') || '#15191f').trim();
+  clone.querySelectorAll('[stroke]').forEach(el => {
+    if ((el.getAttribute('stroke') || '').indexOf('var(') === 0) el.setAttribute('stroke', wave);
+  });
+  clone.querySelectorAll('text').forEach(el => {
+    if (!el.getAttribute('font-family')) el.setAttribute('font-family', 'Consolas, ui-monospace, monospace');
+  });
+  const bg = document.createElementNS(NS, 'rect');
+  bg.setAttribute('x', '0');
+  bg.setAttribute('y', '0');
+  bg.setAttribute('width', clone.getAttribute('width') || '100%');
+  bg.setAttribute('height', clone.getAttribute('height') || '100%');
+  bg.setAttribute('fill', '#ffffff');
+  clone.insertBefore(bg, clone.firstChild);
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone);
+}
+$('#dlsvg').onclick = () => {
+  const text = waveformSvgText();
+  if (!text) {
+    log('No waveform to save. Tick at least one signal, then download again.', 'sys');
+    show('console');
+    return;
+  }
+  downloadBlob('waveform.svg', new Blob([text], { type: 'image/svg+xml' }));
+};
+
+function parseVCD(text) {
+  const vars = {}, order = [], scope = [];
+  let time = 0, defs = true;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (defs) {
+      if (line.startsWith('$scope')) { scope.push(line.split(/\s+/)[2]); continue; }
+      if (line.startsWith('$upscope')) { scope.pop(); continue; }
+      if (line.startsWith('$var')) {
+        const p = line.split(/\s+/);
+        const width = parseInt(p[2], 10), id = p[3];
+        const nm = p[4], range = (p[5] && p[5][0] === '[') ? ' ' + p[5] : '';
+        const full = (scope.length ? scope.join('.') + '.' : '') + nm + range;
+        if (!vars[id]) { vars[id] = { name: full, width, vals: [] }; order.push(id); }
+        continue;
+      }
+      if (line.startsWith('$enddefinitions')) defs = false;
+      continue;
+    }
+    if (line[0] === '#') { time = parseInt(line.slice(1), 10); continue; }
+    if (line[0] === '$') continue;
+    let id, val;
+    if ('bBrR'.includes(line[0])) {
+      const sp = line.indexOf(' ');
+      val = line.slice(1, sp);
+      id = line.slice(sp + 1).trim();
+    } else {
+      val = line[0];
+      id = line.slice(1).trim();
+    }
+    if (vars[id]) {
+      const a = vars[id].vals;
+      if (!a.length || a[a.length - 1][1] !== val) a.push([time, val]);
+    }
+  }
+  const tm = text.match(/\$timescale\s+(\d+)\s*(s|ms|us|ns|ps|fs)/);
+  const exp = { s: 0, ms: -3, us: -6, ns: -9, ps: -12, fs: -15 };
+  const tsSec = tm ? parseInt(tm[1], 10) * Math.pow(10, exp[tm[2]]) : null;
+  return { vars, order, tmax: time || 1, tsSec };
+}
+function binToHex(b) {
+  if (/[xz]/i.test(b)) return /x/i.test(b) ? 'x' : 'z';
+  let s = b;
+  while (s.length % 4) s = '0' + s;
+  let h = '';
+  for (let i = 0; i < s.length; i += 4) h += parseInt(s.substr(i, 4), 2).toString(16);
+  return '0x' + h.replace(/^0+(?=.)/, '');
+}
+function valAt(v, t) {
+  let cur = 'x';
+  for (const e of v.vals) { if (e[0] <= t) cur = e[1]; else break; }
+  return cur;
+}
+function niceStep(span) {
+  const raw = span / 8, p = Math.pow(10, Math.floor(Math.log10(raw) || 0)), f = raw / p;
+  const n = f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10;
+  return Math.max(1, Math.round(n * p));
+}
+function fmtVal(v, raw) { return v.width === 1 ? raw : (/[xz]/i.test(raw) ? raw : binToHex(raw)); }
+function fmtTime(raw) {
+  raw = Math.round(raw);
+  const tsSec = WD && WD.tsSec;
+  if (!tsSec) return '' + raw;
+  if (raw === 0) return '0';
+  const sec = raw * tsSec;
+  const units = [['s', 1], ['ms', 1e-3], ['us', 1e-6], ['ns', 1e-9], ['ps', 1e-12], ['fs', 1e-15]];
+  for (const [u, m] of units) {
+    const v = sec / m, r = Math.round(v);
+    if (r !== 0 && Math.abs(v - r) <= 1e-6 * Math.abs(v)) return r + ' ' + u;
+  }
+  return Math.round(sec / 1e-15) + ' fs';
+}
+
+let WD = null, selOrder = [], view0 = 0, viewSpan = null, curT = null, geom = null;
+const waveArea = $('#wavearea');
+const sigList = $('#siglist');
+
+function buildSigList() {
+  let h = '<div class="sl-head"><span>SIGNALS</span><span><a id="slAll">all</a> · <a id="slNone">none</a></span></div>';
+  for (let i = 0; i < WD.order.length; i++) {
+    const v = WD.vars[WD.order[i]];
+    const on = selOrder.indexOf(WD.order[i]) >= 0 ? ' checked' : '';
+    h += '<label><input type="checkbox" data-i="' + i + '"' + on + '> ' + escapeHtml(v.name) + '</label>';
+  }
+  sigList.innerHTML = h;
+  sigList.style.display = 'block';
+  sigList.querySelectorAll('input').forEach(c => c.onchange = () => {
+    const id = WD.order[+c.getAttribute('data-i')];
+    const k = selOrder.indexOf(id);
+    if (c.checked) { if (k < 0) selOrder.push(id); }
+    else if (k >= 0) selOrder.splice(k, 1);
+    renderWave();
+  });
+  $('#slAll').onclick = () => { selOrder = WD.order.slice(); buildSigList(); renderWave(); };
+  $('#slNone').onclick = () => { selOrder = []; buildSigList(); renderWave(); };
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+function renderWave() {
+  if (!WD) return;
+  const order = selOrder.filter(id => WD.vars[id]);
+  if (!order.length) {
+    waveArea.innerHTML = '<div class="empty">Tick signals on the left to plot them.</div>';
+    geom = null;
+    $('#wmarker').textContent = '';
+    return;
+  }
+  const labelW = 180, rowH = 36, top = 12, padR = 16;
+  const W = Math.max(560, waveArea.clientWidth - 4);
+  const plotX = labelW, plotW = W - plotX - padR;
+  const tmax = WD.tmax;
+  let vw = (viewSpan == null || viewSpan >= tmax) ? tmax : viewSpan;
+  if (viewSpan == null || viewSpan >= tmax) view0 = 0;
+  view0 = Math.max(0, Math.min(Math.max(0, tmax - vw), view0));
+  const px = plotW / vw;
+  const X = t => plotX + (t - view0) * px;
+  const H = top + order.length * rowH + 34;
+  geom = { plotX, plotW, vw, view0, tmax };
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  const add = (tag, at, par) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in at) e.setAttribute(k, at[k]);
+    (par || svg).appendChild(e);
+    return e;
+  };
+  const defs = add('defs', {});
+  const cp = add('clipPath', { id: 'pc' }, defs);
+  add('rect', { x: plotX, y: 0, width: plotW, height: H }, cp);
+  const G = add('g', { 'clip-path': 'url(#pc)' });
+  add('line', { x1: plotX, y1: 0, x2: plotX, y2: top + order.length * rowH + 2, stroke: '#e2e6ec' });
+  order.forEach((id, i) => {
+    const v = WD.vars[id];
+    const y = top + i * rowH, hi = y + 6, lo = y + rowH - 10, mid = y + rowH / 2;
+    add('text', { x: 8, y: mid + 4, fill: '#15191f', 'font-size': 12 }).textContent = v.name;
+    const vals = v.vals.length ? v.vals.slice() : [[0, 'x']];
+    if (vals[0][0] > 0) vals.unshift([0, 'x']);
+    for (let k = 0; k < vals.length; k++) {
+      const t0 = vals[k][0], val = vals[k][1], t1 = (k + 1 < vals.length) ? vals[k + 1][0] : tmax;
+      if (t1 < view0 || t0 > view0 + vw) continue;
+      const x0 = X(t0), x1 = X(t1), bad = /[xz]/i.test(val), isX = /x/i.test(val);
+      const wv = Math.max(0, x1 - x0);
+      if (v.width === 1) {
+        if (bad) add('rect', { x: x0, y: hi, width: wv, height: lo - hi, fill: isX ? '#15191f' : '#9aa3af', opacity: isX ? 0.85 : 0.45 }, G);
+        else {
+          const yy = val === '1' ? hi : lo;
+          add('line', { x1: x0, y1: yy, x2: x1, y2: yy, stroke: 'var(--wave)', 'stroke-width': 1.6 }, G);
+          if (k > 0) add('line', { x1: x0, y1: hi, x2: x0, y2: lo, stroke: 'var(--wave)', 'stroke-width': 1, opacity: 0.65 }, G);
+        }
+      } else if (bad) {
+        add('rect', { x: x0 + 1, y: hi, width: Math.max(0, wv - 2), height: lo - hi, fill: isX ? '#15191f' : '#9aa3af', opacity: isX ? 0.8 : 0.45 }, G);
+      } else {
+        add('line', { x1: x0 + 2, y1: hi, x2: x1 - 2, y2: hi, stroke: 'var(--wave)', 'stroke-width': 1.3 }, G);
+        add('line', { x1: x0 + 2, y1: lo, x2: x1 - 2, y2: lo, stroke: 'var(--wave)', 'stroke-width': 1.3 }, G);
+        add('line', { x1: x0, y1: mid, x2: x0 + 2, y2: hi, stroke: 'var(--wave)', 'stroke-width': 1.3 }, G);
+        add('line', { x1: x0, y1: mid, x2: x0 + 2, y2: lo, stroke: 'var(--wave)', 'stroke-width': 1.3 }, G);
+        if (x1 - x0 > 28) {
+          add('text', { x: (x0 + x1) / 2, y: mid + 4, fill: '#15191f', 'font-size': 11, 'text-anchor': 'middle' }, G).textContent = fmtVal(v, val);
+        }
+      }
+    }
+  });
+  const ay = top + order.length * rowH + 16;
+  add('line', { x1: plotX, y1: ay, x2: plotX + plotW, y2: ay, stroke: '#e2e6ec' });
+  const step = niceStep(vw);
+  for (let t = Math.ceil(view0 / step) * step; t <= view0 + vw + 1e-9; t += step) {
+    const x = X(t);
+    add('line', { x1: x, y1: ay - 3, x2: x, y2: ay + 3, stroke: '#aab2bd' });
+    add('text', { x: x, y: ay + 15, fill: '#677083', 'font-size': 10, 'text-anchor': 'middle' }).textContent = fmtTime(t);
+  }
+  if (curT != null) {
+    const ct = Math.max(0, Math.min(tmax, Math.round(curT)));
+    if (ct >= view0 && ct <= view0 + vw) {
+      add('line', { x1: X(ct), y1: top - 4, x2: X(ct), y2: ay, stroke: '#1d6fe0', 'stroke-width': 1 });
+    }
+    order.forEach((id, i) => {
+      const v = WD.vars[id], y = top + i * rowH;
+      add('text', { x: plotX - 8, y: y + rowH / 2 + 4, fill: '#1d6fe0', 'font-size': 11, 'text-anchor': 'end', 'font-weight': 650 }).textContent = fmtVal(v, valAt(v, ct));
+    });
+    $('#wmarker').textContent = 'Marker: ' + fmtTime(ct);
+  } else $('#wmarker').textContent = '';
+  $('#wrange').textContent = fmtTime(Math.round(view0)) + ' – ' + fmtTime(Math.round(view0 + vw));
+  waveArea.innerHTML = '';
+  waveArea.appendChild(svg);
+}
+
+waveArea.addEventListener('wheel', e => {
+  if (!geom) return;
+  e.preventDefault();
+  const x = e.clientX - waveArea.getBoundingClientRect().left;
+  const tm = geom.view0 + (x - geom.plotX) / geom.plotW * geom.vw;
+  const f = e.deltaY < 0 ? 0.8 : 1.25;
+  const minS = Math.max(1, geom.tmax / 100000);
+  const nw = Math.max(minS, Math.min(geom.tmax, geom.vw * f));
+  if (nw >= geom.tmax) { viewSpan = null; view0 = 0; }
+  else { viewSpan = nw; view0 = Math.max(0, Math.min(geom.tmax - nw, tm - (x - geom.plotX) / geom.plotW * nw)); }
+  renderWave();
+}, { passive: false });
+let drag = null;
+waveArea.addEventListener('mousedown', e => {
+  if (!geom) return;
+  drag = { x: e.clientX, v0: geom.view0, moved: false };
+});
+window.addEventListener('mousemove', e => {
+  if (!drag || !geom) return;
+  const dx = e.clientX - drag.x;
+  if (Math.abs(dx) > 4) drag.moved = true;
+  if (drag.moved) {
+    view0 = Math.max(0, Math.min(geom.tmax - geom.vw, drag.v0 - dx / geom.plotW * geom.vw));
+    renderWave();
+  }
+});
+window.addEventListener('mouseup', e => {
+  if (!drag) return;
+  if (!drag.moved && geom) {
+    const x = e.clientX - waveArea.getBoundingClientRect().left;
+    const t = geom.view0 + (x - geom.plotX) / geom.plotW * geom.vw;
+    curT = Math.max(0, Math.min(geom.tmax, t));
+    renderWave();
+  }
+  drag = null;
+});
+$('#wfit').onclick = () => { viewSpan = null; view0 = 0; renderWave(); };
+window.addEventListener('resize', () => { if (WD) renderWave(); });
+
+(function () {
+  const split = $('#vsplit'), bottom = $('#bottom');
+  let dragging = false;
+  split.addEventListener('mousedown', e => { dragging = true; document.body.style.userSelect = 'none'; e.preventDefault(); });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const total = document.documentElement.clientHeight;
+    bottom.style.height = Math.max(110, Math.min(total - 160, total - e.clientY - 3)) + 'px';
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.userSelect = '';
+    if (WD) renderWave();
+  });
+})();
+
+const TRACE_COLORS = ['#d23730', '#1d6fe0', '#b26a00', '#137a3e', '#7a3ff2', '#0e7490'];
+let SCH = null;
+let schemSrc = '';
+const VIEW = {
+  module: null,
+  stack: [],
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  selected: null,
+  traces: [],
+  mode: 'all',
+  visible: null,
+  needFit: true
+};
+const scanvas = $('#scanvas');
+const stree = $('#stree');
+
+function currentMod() {
+  return SCH && SCH.modules ? SCH.modules[VIEW.module] : null;
+}
+function markSchemDirty() {
+  const tab = $('#stab');
+  if (SCH && designEl.value !== schemSrc) tab.classList.add('dirty');
+}
+designEl.addEventListener('input', markSchemDirty);
+
+function openSchematic(force) {
+  if (!force && SCH && designEl.value === schemSrc) {
+    show('schem');
+    return;
+  }
+  if (typeof Schematic === 'undefined') {
+    show('schem');
+    scanvas.innerHTML = '<div class="empty">Schematic engine did not load.</div>';
+    return;
+  }
+  SCH = Schematic.compile(designEl.value);
+  schemSrc = designEl.value;
+  $('#stab').classList.remove('dirty');
+  VIEW.traces = [];
+  VIEW.selected = null;
+  VIEW.mode = 'all';
+  VIEW.visible = null;
+  $('#sexplore').textContent = 'Explore';
+  const warn = $('#swarn');
+  if (!SCH.ok) {
+    VIEW.module = null;
+    VIEW.stack = [];
+    $('#smod').innerHTML = '';
+    $('#scrumb').innerHTML = '';
+    stree.innerHTML = '';
+    warn.style.display = 'block';
+    warn.textContent = SCH.error || 'Could not draw a schematic.';
+    show('schem');
+    scanvas.innerHTML = '<div class="empty">' + escapeHtml(SCH.error || 'Could not draw a schematic.') + '</div>';
+    $('#sprop').textContent = '';
+    return;
+  }
+  VIEW.module = SCH.top;
+  VIEW.stack = [{ module: SCH.top, inst: null }];
+  const sel = $('#smod');
+  sel.innerHTML = '';
+  SCH.order.forEach(name => {
+    const o = document.createElement('option');
+    o.value = name;
+    o.textContent = name;
+    sel.appendChild(o);
+  });
+  sel.value = VIEW.module;
+  if (SCH.warnings && SCH.warnings.length) {
+    warn.style.display = 'block';
+    warn.textContent = SCH.warnings.slice(0, 3).join(' ');
+  } else warn.style.display = 'none';
+  buildTree();
+  renderCrumb();
+  VIEW.needFit = true;
+  show('schem');
+}
+function renderCrumb() {
+  const box = $('#scrumb');
+  box.innerHTML = '';
+  VIEW.stack.forEach((step, i) => {
+    if (i) {
+      const sep = document.createElement('span');
+      sep.textContent = '/';
+      sep.style.color = '#8b95a3';
+      box.appendChild(sep);
+    }
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = step.inst ? (step.inst + ' · ' + step.module) : step.module;
+    b.onclick = () => {
+      VIEW.stack = VIEW.stack.slice(0, i + 1);
+      VIEW.module = step.module;
+      $('#smod').value = step.module;
+      VIEW.traces = [];
+      VIEW.selected = null;
+      if (VIEW.mode === 'explore') VIEW.visible = new Set();
+      buildTree();
+      renderCrumb();
+      renderSchem(true);
+    };
+    box.appendChild(b);
+  });
+}
+function buildTree() {
+  const mod = currentMod();
+  if (!mod) { stree.innerHTML = ''; return; }
+  let h = '<div class="sl-head"><span>' + escapeHtml(mod.name) + '</span></div>';
+  h += '<div class="tg">PORTS</div>';
+  mod.ports.forEach(p => {
+    const label = (p.dir || 'net') + ' ' + p.name + (p.width > 1 ? '[' + p.msb + ':' + p.lsb + ']' : '');
+    h += '<div class="ti" data-kind="port" data-name="' + escapeHtml(p.name) + '">' + escapeHtml(label) + '</div>';
+  });
+  h += '<div class="tg">INSTANCES</div>';
+  mod.cells.forEach(c => {
+    if (c.kind === 'port') return;
+    h += '<div class="ti" data-kind="cell" data-cid="' + c.id + '">' + escapeHtml(c.name) + ' <em>' + escapeHtml(c.typeName || c.kind) + '</em></div>';
+  });
+  stree.innerHTML = h;
+  stree.querySelectorAll('.ti').forEach(row => {
+    row.onclick = () => {
+      if (row.dataset.cid) selectCell(+row.dataset.cid, true);
+    };
+    row.oncontextmenu = e => {
+      e.preventDefault();
+      if (row.dataset.cid) {
+        VIEW.selected = { type: 'cell', id: +row.dataset.cid };
+        showMenu(e.clientX, e.clientY, +row.dataset.cid, null);
+      }
+    };
+  });
+}
+function cellById(id) {
+  const mod = currentMod();
+  if (!mod) return null;
+  for (let i = 0; i < mod.cells.length; i++) if (mod.cells[i].id === id) return mod.cells[i];
+  return null;
+}
+function netById(id) {
+  const mod = currentMod();
+  if (!mod) return null;
+  for (let i = 0; i < mod.nets.length; i++) if (mod.nets[i].id === id) return mod.nets[i];
+  return null;
+}
+function cellsOnNet(nid) {
+  const mod = currentMod();
+  const ids = [];
+  if (!mod) return ids;
+  mod.cells.forEach(c => c.pins.forEach(p => {
+    if (p.net && p.net.id === nid) ids.push(c.id);
+  }));
+  return ids;
+}
+function updateProp() {
+  const el = $('#sprop');
+  if (!VIEW.selected) { el.textContent = ''; return; }
+  if (VIEW.selected.type === 'cell') {
+    const c = cellById(VIEW.selected.id);
+    el.textContent = c ? ((c.typeName || c.kind) + ' ' + c.name + (c.line ? ' · line ' + c.line : '') + (c.detail ? ' · ' + c.detail : '')) : '';
+  } else {
+    const n = netById(VIEW.selected.id);
+    el.textContent = n ? ('net ' + (n.label || ('#' + n.id)) + (n.also && n.also.length ? ' (' + n.also.join(', ') + ')' : '')) : '';
+  }
+}
+function renderSchem(doFit) {
+  const mod = currentMod();
+  hideMenu();
+  if (!mod) return;
+  const ui = {
+    panX: VIEW.panX,
+    panY: VIEW.panY,
+    zoom: VIEW.zoom,
+    selected: VIEW.selected,
+    traces: VIEW.traces,
+    visible: VIEW.mode === 'explore' ? VIEW.visible : null
+  };
+  Schematic.layout(mod, ui.visible);
+  if (doFit) {
+    const f = Schematic.fit(mod, Math.max(200, scanvas.clientWidth), Math.max(120, scanvas.clientHeight));
+    VIEW.zoom = f.zoom;
+    VIEW.panX = f.panX;
+    VIEW.panY = f.panY;
+    ui.zoom = f.zoom;
+    ui.panX = f.panX;
+    ui.panY = f.panY;
+  }
+  const svg = Schematic.draw(mod, ui);
+  scanvas.innerHTML = '';
+  scanvas.appendChild(svg);
+  if (VIEW.mode === 'explore' && VIEW.visible && VIEW.visible.size === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Explore mode. Right-click an instance in the tree and choose Show in schematic. Click a hollow pin to add its net.';
+    scanvas.appendChild(empty);
+  }
+  updateProp();
+  stree.querySelectorAll('.ti').forEach(row => {
+    row.classList.toggle('on', VIEW.selected && VIEW.selected.type === 'cell' && row.dataset.cid === String(VIEW.selected.id));
+  });
+}
+function zoomSchem(factor) {
+  const w = scanvas.clientWidth / 2, h = scanvas.clientHeight / 2;
+  const nz = Math.max(0.15, Math.min(4, VIEW.zoom * factor));
+  const k = nz / VIEW.zoom;
+  VIEW.panX = w - (w - VIEW.panX) * k;
+  VIEW.panY = h - (h - VIEW.panY) * k;
+  VIEW.zoom = nz;
+  renderSchem(false);
+}
+function selectCell(id, reveal) {
+  VIEW.selected = { type: 'cell', id: id };
+  if (reveal && VIEW.mode === 'explore') {
+    if (!VIEW.visible) VIEW.visible = new Set();
+    VIEW.visible.add(id);
+  }
+  renderSchem(false);
+}
+function descend(cell) {
+  if (!cell || !cell.child || !SCH.modules[cell.child]) return;
+  VIEW.stack.push({ module: cell.child, inst: cell.name });
+  VIEW.module = cell.child;
+  $('#smod').value = cell.child;
+  VIEW.traces = [];
+  VIEW.selected = null;
+  if (VIEW.mode === 'explore') VIEW.visible = new Set();
+  buildTree();
+  renderCrumb();
+  renderSchem(true);
+}
+function selectLine(el, line) {
+  if (!line) return;
+  const lines = el.value.split('\n');
+  let start = 0;
+  for (let i = 0; i < line - 1 && i < lines.length; i++) start += lines[i].length + 1;
+  const end = start + ((lines[line - 1] || '').length);
+  showFile('design');
+  el.focus();
+  el.setSelectionRange(start, end);
+  el.scrollTop = Math.max(0, (line - 4) * 21);
+}
+function outputNet(cell) {
+  if (!cell) return null;
+  for (let i = 0; i < cell.pins.length; i++) {
+    if (cell.pins[i].dir === 'out' && cell.pins[i].net) return cell.pins[i].net;
+  }
+  for (let i = 0; i < cell.pins.length; i++) if (cell.pins[i].net) return cell.pins[i].net;
+  return null;
+}
+function traceNet(net) {
+  if (!net) return;
+  const acc = Schematic.traceFrom(net);
+  VIEW.traces.push({ color: TRACE_COLORS[VIEW.traces.length % TRACE_COLORS.length], nets: acc.nets, cells: acc.cells });
+  if (VIEW.mode === 'explore') {
+    if (!VIEW.visible) VIEW.visible = new Set();
+    Object.keys(acc.cells).forEach(id => VIEW.visible.add(+id));
+  }
+  renderSchem(false);
+}
+function hideMenu() { $('#smenu').style.display = 'none'; }
+function showMenu(x, y, cid, nid) {
+  const menu = $('#smenu');
+  const cell = cid ? cellById(cid) : null;
+  const net = nid ? netById(nid) : (cell ? outputNet(cell) : null);
+  const items = [];
+  if (net) items.push(['Trace to driver', () => traceNet(net)]);
+  if (cell) items.push(['Show in schematic', () => {
+    VIEW.mode = 'explore';
+    if (!VIEW.visible) VIEW.visible = new Set();
+    $('#sexplore').textContent = 'Show all';
+    VIEW.visible.add(cell.id);
+    renderSchem(true);
+  }]);
+  if (cell) items.push(['Show all pins', () => {
+    if (VIEW.mode !== 'explore') { VIEW.mode = 'explore'; VIEW.visible = new Set(); $('#sexplore').textContent = 'Show all'; }
+    VIEW.visible.add(cell.id);
+    cell.pins.forEach(p => { if (p.net) cellsOnNet(p.net.id).forEach(id => VIEW.visible.add(id)); });
+    renderSchem(true);
+  }]);
+  if (cell && cell.child && SCH.modules[cell.child]) items.push(['Open ' + cell.typeName, () => descend(cell)]);
+  if (cell && cell.line) items.push(['Show source', () => selectLine(designEl, cell.line)]);
+  items.push(['Fit', () => renderSchem(true)]);
+  if (VIEW.traces.length) items.push(['Clear traces', () => { VIEW.traces = []; renderSchem(false); }]);
+  menu.innerHTML = '';
+  items.forEach(pair => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = pair[0];
+    b.onclick = () => { hideMenu(); pair[1](); };
+    menu.appendChild(b);
+  });
+  menu.style.display = 'block';
+  menu.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 40 - items.length * 32) + 'px';
+}
+function exportSchem() {
+  const mod = currentMod();
+  if (!mod) return;
+  const ui = {
+    panX: 0, panY: 0, zoom: 1, selected: null, traces: VIEW.traces,
+    visible: VIEW.mode === 'explore' ? VIEW.visible : null
+  };
+  const svg = Schematic.draw(mod, ui);
+  const b = mod.bbox;
+  svg.setAttribute('width', String(Math.ceil(b.w)));
+  svg.setAttribute('height', String(Math.ceil(b.h)));
+  svg.setAttribute('viewBox', [b.x, b.y, b.w, b.h].join(' '));
+  const vp = svg.querySelector('#vp');
+  if (vp) vp.removeAttribute('transform');
+  const NS = 'http://www.w3.org/2000/svg';
+  const bg = document.createElementNS(NS, 'rect');
+  bg.setAttribute('x', b.x);
+  bg.setAttribute('y', b.y);
+  bg.setAttribute('width', b.w);
+  bg.setAttribute('height', b.h);
+  bg.setAttribute('fill', '#fbfcfe');
+  svg.insertBefore(bg, svg.firstChild);
+  svg.querySelectorAll('text').forEach(el => {
+    if (!el.getAttribute('font-family')) el.setAttribute('font-family', 'Consolas, ui-monospace, monospace');
+  });
+  const text = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(svg);
+  downloadBlob((mod.name || 'schematic') + '.svg', new Blob([text], { type: 'image/svg+xml' }));
+  renderSchem(false);
+}
+
+$('#smod').onchange = () => {
+  VIEW.module = $('#smod').value;
+  VIEW.stack = [{ module: VIEW.module, inst: null }];
+  VIEW.traces = [];
+  VIEW.selected = null;
+  if (VIEW.mode === 'explore') VIEW.visible = new Set();
+  buildTree();
+  renderCrumb();
+  renderSchem(true);
+};
+$('#sfit').onclick = () => renderSchem(true);
+$('#szin').onclick = () => zoomSchem(1.15);
+$('#szout').onclick = () => zoomSchem(1 / 1.15);
+$('#sexplore').onclick = () => {
+  if (VIEW.mode === 'all') {
+    VIEW.mode = 'explore';
+    VIEW.visible = new Set();
+    $('#sexplore').textContent = 'Show all';
+  } else {
+    VIEW.mode = 'all';
+    VIEW.visible = null;
+    $('#sexplore').textContent = 'Explore';
+  }
+  renderSchem(true);
+};
+$('#strace').onclick = () => {
+  let net = null;
+  if (VIEW.selected && VIEW.selected.type === 'net') net = netById(VIEW.selected.id);
+  else if (VIEW.selected && VIEW.selected.type === 'cell') net = outputNet(cellById(VIEW.selected.id));
+  if (!net) {
+    $('#sprop').textContent = 'Select a gate, pin, or wire first.';
+    return;
+  }
+  traceNet(net);
+};
+$('#sclear').onclick = () => { VIEW.traces = []; renderSchem(false); };
+$('#ssvg').onclick = exportSchem;
+$('#shelpb').onclick = () => {
+  let box = $('#shelp');
+  if (box) { box.remove(); return; }
+  box = document.createElement('div');
+  box.id = 'shelp';
+  box.innerHTML = '<b>Schematic</b>' +
+    '<p>Wheel zooms. Drag the background to pan. Click a gate or wire to select it.</p>' +
+    '<p>Trace to driver colors the combinational fan-in back to flip-flops and ports. A second trace uses another color; shared wires are dashed.</p>' +
+    '<p>Explore starts empty: Show in schematic, then click a hollow pin to add that net. Double-click a module to open it. 0 fits the view.</p>';
+  scanvas.appendChild(box);
+};
+document.addEventListener('click', e => {
+  if (!e.target.closest('#smenu')) hideMenu();
+});
+scanvas.addEventListener('contextmenu', e => {
+  if (!currentMod()) return;
+  e.preventDefault();
+  const pin = e.target.closest('[data-pid]');
+  const cellEl = e.target.closest('[data-cid]');
+  const wire = e.target.closest('[data-nid]');
+  const cid = cellEl ? +cellEl.getAttribute('data-cid') : null;
+  const nid = pin ? +pin.getAttribute('data-nid') : (wire ? +wire.getAttribute('data-nid') : null);
+  if (cid) VIEW.selected = { type: 'cell', id: cid };
+  else if (nid) VIEW.selected = { type: 'net', id: nid };
+  showMenu(e.clientX, e.clientY, cid, nid);
+});
+scanvas.addEventListener('dblclick', e => {
+  const cellEl = e.target.closest('[data-cid]');
+  if (!cellEl) return;
+  const cell = cellById(+cellEl.getAttribute('data-cid'));
+  if (cell && cell.kind === 'mod' && cell.child) descend(cell);
+});
+scanvas.addEventListener('click', e => {
+  if (scanvas._moved) { scanvas._moved = false; return; }
+  if (e.target.closest('#shelp')) return;
+  const pin = e.target.closest('[data-pid]');
+  if (pin && pin.getAttribute('data-open') === '1' && VIEW.mode === 'explore') {
+    const nid = +pin.getAttribute('data-nid');
+    if (!VIEW.visible) VIEW.visible = new Set();
+    cellsOnNet(nid).forEach(id => VIEW.visible.add(id));
+    renderSchem(false);
+    return;
+  }
+  const cellEl = e.target.closest('[data-cid]');
+  const wire = e.target.closest('[data-nid]');
+  if (cellEl) VIEW.selected = { type: 'cell', id: +cellEl.getAttribute('data-cid') };
+  else if (wire) VIEW.selected = { type: 'net', id: +wire.getAttribute('data-nid') };
+  else VIEW.selected = null;
+  renderSchem(false);
+});
+// glyph and module body both use double-click (handler above) to open a child module
+scanvas.addEventListener('wheel', e => {
+  if (!currentMod()) return;
+  e.preventDefault();
+  const rect = scanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const nz = Math.max(0.15, Math.min(4, VIEW.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
+  const k = nz / VIEW.zoom;
+  VIEW.panX = mx - (mx - VIEW.panX) * k;
+  VIEW.panY = my - (my - VIEW.panY) * k;
+  VIEW.zoom = nz;
+  renderSchem(false);
+}, { passive: false });
+let schemDrag = null;
+scanvas.addEventListener('pointerdown', e => {
+  if (e.button === 2) return;
+  schemDrag = { x: e.clientX, y: e.clientY, px: VIEW.panX, py: VIEW.panY, moved: false };
+});
+window.addEventListener('pointermove', e => {
+  if (!schemDrag) return;
+  const dx = e.clientX - schemDrag.x;
+  const dy = e.clientY - schemDrag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 4) {
+    schemDrag.moved = true;
+    scanvas.classList.add('panning');
+    VIEW.panX = schemDrag.px + dx;
+    VIEW.panY = schemDrag.py + dy;
+    renderSchem(false);
+  }
+});
+window.addEventListener('pointerup', () => {
+  if (schemDrag && schemDrag.moved) scanvas._moved = true;
+  schemDrag = null;
+  scanvas.classList.remove('panning');
+});
+
+status('ready — press Run or Schematic');
+</script>
+</body>
+</html>
