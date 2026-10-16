@@ -1,0 +1,4 @@
+tools/tectonic.exe
+tools/tectonic.zip
+tools/*.pdf
+__pycache__/

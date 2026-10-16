@@ -285,7 +285,7 @@
     font-size: 12px;
   }
   .codebar .spacer { flex: 1; }
-  #verilog {
+  #verilog, #tikz {
     flex: 1;
     min-height: 0;
     border: none;
@@ -299,6 +299,17 @@
     font-size: 12px;
     line-height: 1.5;
   }
+  #verilog[hidden], #tikz[hidden] { display: none; }
+  .codebar .tabbtn {
+    border: none;
+    background: transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 6px 8px;
+    font-family: var(--mono);
+    color: var(--muted);
+  }
+  .codebar .tabbtn.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 650; }
   #toast {
     position: fixed;
     bottom: 16px;
@@ -381,6 +392,7 @@
   <button id="imp" type="button">Import</button>
   <button id="save" type="button">Save</button>
   <button id="exp" type="button">Verilog</button>
+  <button id="pdf" type="button" title="Compile the CircuiTikZ to PDF">PDF</button>
 </header>
 <div class="tabs" id="tabs"></div>
 <div class="app">
@@ -401,11 +413,14 @@
     <section id="issues"></section>
     <section class="code">
       <div class="codebar">
-        <span>Verilog</span>
+        <button id="tabVerilog" type="button" class="tabbtn on">Verilog</button>
+        <button id="tabTikz" type="button" class="tabbtn">CircuiTikZ</button>
         <span class="spacer"></span>
+        <button id="tikzApply" type="button" class="mini" hidden>Update drawing</button>
         <button id="copy" type="button" class="mini">Copy</button>
       </div>
       <textarea id="verilog" readonly spellcheck="false"></textarea>
+      <textarea id="tikz" spellcheck="false" hidden></textarea>
     </section>
   </aside>
 </div>
@@ -427,6 +442,7 @@
 <input id="file" type="file" accept=".json,.v,.sv,.txt,application/json,text/plain" hidden>
 <script src="schematic.js"></script>
 <script src="design.js"></script>
+<script src="circuitikz.js"></script>
 <script src="designer.js"></script>
 </body>
 </html>

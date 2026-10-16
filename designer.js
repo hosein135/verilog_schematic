@@ -31,7 +31,9 @@
     report: null,
     viewer: null,
     notes: [],
-    space: false
+    space: false,
+    codeTab: 'verilog',
+    tikzDirty: false
   };
   var saveTimer = null;
   var toastTimer = null;
@@ -226,7 +228,7 @@
     });
     el('div', {
       class: 'help',
-      text: 'Gates export as Verilog primitives, so a NAND stays a NAND. A mux becomes assign y = s ? d1 : d0. A flip-flop becomes an always block.'
+      text: 'Gates export as Verilog primitives, so a NAND stays a NAND. The CircuiTikZ tab is the same drawing in LaTeX: Update drawing reads it back, and PDF compiles it.'
     }, host);
   }
 
@@ -543,8 +545,120 @@
     }
   }
 
+  function currentTex() {
+    if (state.tikzDirty && $('#tikz')) return $('#tikz').value;
+    return (typeof CircuitTikZ !== 'undefined' && state.doc) ? CircuitTikZ.toTex(state.doc) : '';
+  }
+
   function renderCode() {
     $('#verilog').value = (state.report && state.report.verilog) || '';
+    var tikz = $('#tikz');
+    if (tikz && !state.tikzDirty && document.activeElement !== tikz && typeof CircuitTikZ !== 'undefined' && state.doc) {
+      tikz.value = CircuitTikZ.toTex(state.doc);
+    }
+  }
+
+  function showCodeTab(which) {
+    state.codeTab = which === 'tikz' ? 'tikz' : 'verilog';
+    var tikzOn = state.codeTab === 'tikz';
+    $('#verilog').hidden = tikzOn;
+    $('#tikz').hidden = !tikzOn;
+    $('#tabVerilog').classList.toggle('on', !tikzOn);
+    $('#tabTikz').classList.toggle('on', tikzOn);
+    $('#tikzApply').hidden = !tikzOn;
+    if (tikzOn) renderCode();
+  }
+
+  function applyTikz() {
+    if (typeof CircuitTikZ === 'undefined') { toast('CircuiTikZ converter did not load'); return; }
+    var out = CircuitTikZ.fromTex($('#tikz').value);
+    if (!out.doc || !out.doc.modules || !out.doc.modules.length) {
+      toast('No CircuiTikZ picture in that text');
+      return;
+    }
+    pushUndo();
+    state.doc = out.doc;
+    state.notes = out.warnings || [];
+    state.sel = null;
+    state.tool = '';
+    state.wiring = null;
+    state.tikzDirty = false;
+    syncPalette();
+    onDocChange();
+    requestAnimationFrame(fit);
+    toast(out.warnings && out.warnings.length ? 'Drawing updated, with notes' : 'Drawing updated from CircuiTikZ');
+  }
+
+  function postPdf(url, tex) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      body: tex
+    }).then(function (res) {
+      if (!res.ok) return res.text().then(function (t) { throw new Error(t || ('Compiler returned ' + res.status)); });
+      return res.blob();
+    });
+  }
+
+  function compilePdf(tex) {
+    var urls = [];
+    if (location.protocol !== 'file:') urls.push(new URL('/compile', location.href).href);
+    urls.push('http://127.0.0.1:8757/compile');
+    var chain = Promise.reject(new Error('no compiler'));
+    urls.forEach(function (url) {
+      chain = chain.catch(function () { return postPdf(url, tex); });
+    });
+    return chain.catch(function () { return swiftPdf(tex); });
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('Could not load the LaTeX engine')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function swiftPdf(tex) {
+    var ready = window.PdfTeXEngine ? Promise.resolve() : loadScript('https://cdn.jsdelivr.net/gh/SwiftLaTeX/SwiftLaTeX@master/PdfTeXEngine.js');
+    return ready.then(function () {
+      if (typeof PdfTeXEngine === 'undefined') throw new Error('LaTeX engine is unavailable');
+      var engine = new PdfTeXEngine();
+      return engine.loadEngine().then(function () {
+        engine.writeMemFSFile('main.tex', tex);
+        engine.setEngineMainFile('main.tex');
+        return engine.compileLaTeX();
+      }).then(function (result) {
+        if (engine.closeWorker) engine.closeWorker();
+        if (!result || result.status !== 0 || !result.pdf) {
+          var log = (result && result.log) ? String(result.log).slice(-500) : 'compile failed';
+          throw new Error(log);
+        }
+        return new Blob([result.pdf], { type: 'application/pdf' });
+      });
+    });
+  }
+
+  function exportPdf() {
+    var tex = currentTex();
+    var btn = $('#pdf');
+    btn.disabled = true;
+    var label = btn.textContent;
+    btn.textContent = 'PDF…';
+    compilePdf(tex).then(function (blob) {
+      download((active().name || 'circuit') + '.pdf', blob, 'application/pdf');
+      toast('PDF saved');
+    }).catch(function (err) {
+      download((active().name || 'circuit') + '.tex', tex, 'text/plain');
+      var msg = (err && err.message) ? err.message : 'Compile failed';
+      if (msg.length > 180) msg = msg.slice(-180);
+      toast('Saved the .tex. ' + msg);
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = label;
+    });
   }
 
   function allIssues() {
@@ -1084,7 +1198,7 @@
       if (p.y + m.h + 18 > y1) y1 = p.y + m.h + 18;
     });
     var pad = 64;
-    var z = Math.min((rect.width - pad) / Math.max(1, x1 - x0), (rect.height - pad) / Math.max(1, y1 - y0));
+    var z = Math.min((rect.width - pad) / Math.max(1, x1 - x0), (rect.height - pad - 28) / Math.max(1, y1 - y0));
     if (!isFinite(z) || z <= 0) z = 1;
     z = Math.max(0.25, Math.min(1.7, z));
     state.view.z = z;
@@ -1268,8 +1382,8 @@
     }
   }
 
-  function download(name, text, type) {
-    var blob = new Blob([text], { type: type });
+  function download(name, data, type) {
+    var blob = (typeof Blob !== 'undefined' && data instanceof Blob) ? data : new Blob([data], { type: type });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = name;
@@ -1359,6 +1473,7 @@
     pushUndo();
     state.doc = out.doc;
     state.notes = out.warnings || [];
+    state.tikzDirty = false;
     state.sel = null;
     state.tool = '';
     state.wiring = null;
@@ -1371,6 +1486,22 @@
   function openFileText(text, filename) {
     var trimmed = String(text || '').trim();
     if (!trimmed) return;
+    if (/\\begin\{circuitikz\}|\\usepackage(\[[^\]]*\])?\{circuitikz\}/.test(text) && typeof CircuitTikZ !== 'undefined') {
+      var drawn = CircuitTikZ.fromTex(text);
+      if (drawn.doc && drawn.doc.modules && drawn.doc.modules.length && drawn.doc.modules[0].parts) {
+        pushUndo();
+        state.doc = drawn.doc;
+        state.notes = drawn.warnings || [];
+        state.sel = null;
+        state.tikzDirty = false;
+        onDocChange();
+        closeSheet();
+        requestAnimationFrame(fit);
+        showCodeTab('tikz');
+        toast('Opened CircuiTikZ');
+        return;
+      }
+    }
     if (trimmed.charAt(0) === '{' || /\.json$/i.test(filename || '')) {
       try {
         var data = JSON.parse(text);
@@ -1449,20 +1580,27 @@
       }
     });
     $('#copy').addEventListener('click', function () {
-      var text = state.report ? state.report.verilog : '';
+      var box = state.codeTab === 'tikz' ? $('#tikz') : $('#verilog');
+      var text = box ? box.value : '';
+      var label = state.codeTab === 'tikz' ? 'CircuiTikZ' : 'Verilog';
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { toast('Copied Verilog'); }, function () {
-          $('#verilog').focus();
-          $('#verilog').select();
-          toast('Select the Verilog and copy it');
+        navigator.clipboard.writeText(text).then(function () { toast('Copied ' + label); }, function () {
+          box.focus();
+          box.select();
+          toast('Select the text and copy it');
         });
       } else {
-        $('#verilog').focus();
-        $('#verilog').select();
-        try { document.execCommand('copy'); toast('Copied Verilog'); }
-        catch (err) { toast('Select the Verilog and copy it'); }
+        box.focus();
+        box.select();
+        try { document.execCommand('copy'); toast('Copied ' + label); }
+        catch (err) { toast('Select the text and copy it'); }
       }
     });
+    $('#tabVerilog').addEventListener('click', function () { showCodeTab('verilog'); });
+    $('#tabTikz').addEventListener('click', function () { showCodeTab('tikz'); });
+    $('#tikzApply').addEventListener('click', applyTikz);
+    $('#pdf').addEventListener('click', exportPdf);
+    $('#tikz').addEventListener('input', function () { state.tikzDirty = true; });
     $('#exp').addEventListener('click', function () {
       var name = (active().name || 'schematic') + '.v';
       download(name, state.report ? state.report.verilog : '', 'text/plain');
@@ -1494,6 +1632,7 @@
       state.tool = '';
       state.wiring = null;
       state.notes = [];
+      state.tikzDirty = false;
       syncPalette();
       onDocChange();
       requestAnimationFrame(fit);
