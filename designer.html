@@ -392,7 +392,8 @@
   <button id="imp" type="button">Import</button>
   <button id="save" type="button">Save</button>
   <button id="exp" type="button">Verilog</button>
-  <button id="pdf" type="button" title="Compile the CircuiTikZ to PDF">PDF</button>
+  <button id="tex" type="button" title="Download the CircuiTikZ .tex file">.tex</button>
+  <button id="pdf" type="button" title="Compile that CircuiTikZ file to PDF">PDF</button>
 </header>
 <div class="tabs" id="tabs"></div>
 <div class="app">
@@ -417,6 +418,7 @@
         <button id="tabTikz" type="button" class="tabbtn">CircuiTikZ</button>
         <span class="spacer"></span>
         <button id="tikzApply" type="button" class="mini" hidden>Update drawing</button>
+        <button id="texDown" type="button" class="mini" hidden>Download .tex</button>
         <button id="copy" type="button" class="mini">Copy</button>
       </div>
       <textarea id="verilog" readonly spellcheck="false"></textarea>

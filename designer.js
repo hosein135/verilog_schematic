@@ -566,6 +566,7 @@
     $('#tabVerilog').classList.toggle('on', !tikzOn);
     $('#tabTikz').classList.toggle('on', tikzOn);
     $('#tikzApply').hidden = !tikzOn;
+    $('#texDown').hidden = !tikzOn;
     if (tikzOn) renderCode();
   }
 
@@ -602,43 +603,30 @@
 
   function compilePdf(tex) {
     var urls = [];
-    if (location.protocol !== 'file:') urls.push(new URL('/compile', location.href).href);
+    if (location.protocol !== 'file:') {
+      try { urls.push(new URL('/compile', location.href).href); } catch (err) { /* ignore */ }
+    }
     urls.push('http://127.0.0.1:8757/compile');
-    var chain = Promise.reject(new Error('no compiler'));
+    var seen = Object.create(null);
+    var chain = Promise.reject(new Error('offline'));
     urls.forEach(function (url) {
+      if (seen[url]) return;
+      seen[url] = 1;
       chain = chain.catch(function () { return postPdf(url, tex); });
     });
-    return chain.catch(function () { return swiftPdf(tex); });
-  }
-
-  function loadScript(src) {
-    return new Promise(function (resolve, reject) {
-      var s = document.createElement('script');
-      s.src = src;
-      s.onload = function () { resolve(); };
-      s.onerror = function () { reject(new Error('Could not load the LaTeX engine')); };
-      document.head.appendChild(s);
+    return chain.catch(function (err) {
+      var msg = err && err.message ? err.message : '';
+      if (!msg || /offline|failed to fetch|networkerror|load failed|network error/i.test(msg)) {
+        throw new Error('The PDF compiler is not running. Start it with bash run.sh, open http://127.0.0.1:8757/designer.html, and click PDF again.');
+      }
+      throw err;
     });
   }
 
-  function swiftPdf(tex) {
-    var ready = window.PdfTeXEngine ? Promise.resolve() : loadScript('https://cdn.jsdelivr.net/gh/SwiftLaTeX/SwiftLaTeX@master/PdfTeXEngine.js');
-    return ready.then(function () {
-      if (typeof PdfTeXEngine === 'undefined') throw new Error('LaTeX engine is unavailable');
-      var engine = new PdfTeXEngine();
-      return engine.loadEngine().then(function () {
-        engine.writeMemFSFile('main.tex', tex);
-        engine.setEngineMainFile('main.tex');
-        return engine.compileLaTeX();
-      }).then(function (result) {
-        if (engine.closeWorker) engine.closeWorker();
-        if (!result || result.status !== 0 || !result.pdf) {
-          var log = (result && result.log) ? String(result.log).slice(-500) : 'compile failed';
-          throw new Error(log);
-        }
-        return new Blob([result.pdf], { type: 'application/pdf' });
-      });
-    });
+  function downloadTex() {
+    var tex = currentTex();
+    download((active().name || 'circuit') + '.tex', tex, 'application/x-tex');
+    toast('Downloaded ' + (active().name || 'circuit') + '.tex');
   }
 
   function exportPdf() {
@@ -1599,6 +1587,8 @@
     $('#tabVerilog').addEventListener('click', function () { showCodeTab('verilog'); });
     $('#tabTikz').addEventListener('click', function () { showCodeTab('tikz'); });
     $('#tikzApply').addEventListener('click', applyTikz);
+    $('#tex').addEventListener('click', downloadTex);
+    $('#texDown').addEventListener('click', downloadTex);
     $('#pdf').addEventListener('click', exportPdf);
     $('#tikz').addEventListener('input', function () { state.tikzDirty = true; });
     $('#exp').addEventListener('click', function () {
