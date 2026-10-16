@@ -87,6 +87,19 @@
     cursor: pointer;
   }
   #toSch:hover { background: #eef5ff; }
+  a.toDraw {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: #fff;
+    color: var(--text);
+    font-weight: 700;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 7px 14px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  a.toDraw:hover { border-color: var(--accent); color: var(--accent); }
   main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   .filebar {
     display: flex;
@@ -351,6 +364,7 @@
     <option value="2009">Verilog-2009</option>
     <option value="2012">SystemVerilog-2012</option>
   </select>
+  <a class="toDraw" href="designer.html" title="Draw a schematic and export Verilog">Designer</a>
   <button id="toSch" type="button" title="Draw the Verilog tab as a schematic">Schematic</button>
   <button id="run" title="Compile and simulate (Ctrl+Enter)">&#9658; Run</button>
 </header>
@@ -634,9 +648,18 @@ function saveLocal() {
 (function initEditors() {
   let d = null, t = null, g = null;
   try {
-    d = localStorage.getItem('vsch-design');
-    t = localStorage.getItem('vsch-tb');
-    g = localStorage.getItem('vsch-gen');
+    var handoff = localStorage.getItem('vsch-from-designer');
+    if (handoff != null) {
+      localStorage.removeItem('vsch-from-designer');
+      d = handoff;
+      t = localStorage.getItem('vsch-tb');
+      if (t == null) t = '';
+      g = localStorage.getItem('vsch-gen');
+    } else {
+      d = localStorage.getItem('vsch-design');
+      t = localStorage.getItem('vsch-tb');
+      g = localStorage.getItem('vsch-gen');
+    }
   } catch (e) {}
   if (d == null && t == null) loadPair(EXAMPLES.gate.design, EXAMPLES.gate.tb);
   else {
