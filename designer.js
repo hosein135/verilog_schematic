@@ -31,9 +31,7 @@
     report: null,
     viewer: null,
     notes: [],
-    space: false,
-    codeTab: 'verilog',
-    tikzDirty: false
+    space: false
   };
   var saveTimer = null;
   var toastTimer = null;
@@ -168,6 +166,7 @@
     if (document.activeElement !== $('#modname')) $('#modname').value = active().name || '';
     $('#undo').disabled = !state.past.length;
     $('#redo').disabled = !state.future.length;
+    $('#del').disabled = !state.sel;
     saveSoon();
   }
 
@@ -210,7 +209,7 @@
     else if (type === 'dff') body = '<rect ' + s + ' x="4" y="3" width="24" height="16" fill="#fff8ec"/>';
     else if (type === 'c0' || type === 'c1') body = '<rect ' + s + ' x="6" y="3" width="16" height="16" rx="4" fill="#eef1f5"/><text x="14" y="15" text-anchor="middle" font-size="11" font-family="Segoe UI,sans-serif" fill="#161b22">' + (type === 'c1' ? '1' : '0') + '</text>';
     else if (type === 'block') body = '<rect ' + s + ' x="4" y="3" width="26" height="16" fill="#f3f6fb" stroke-dasharray="3 2"/>';
-    else body = '<path ' + s + ' d="M6 4 L12 18 L20 4" />';
+    else body = '<path ' + s + ' d="M8 3 L8 16 L11.5 12.5 L16 18 L18.2 16.8 L13.6 11.2 L18 11 Z" fill="#fff"/>';
     return '<svg viewBox="0 0 36 22" aria-hidden="true">' + body + '</svg>';
   }
 
@@ -226,10 +225,18 @@
         b.appendChild(document.createTextNode(item[1]));
       });
     });
-    el('div', {
-      class: 'help',
-      text: 'Gates export as Verilog primitives, so a NAND stays a NAND. The CircuiTikZ tab is the same drawing in LaTeX: Update drawing reads it back, and PDF compiles it.'
-    }, host);
+    var help = el('div', { class: 'help' }, host);
+    el('p', { text: 'Click a tool, then the sheet. Drag a tool on to place it once. Shift keeps the tool armed.' }, help);
+    el('p', { text: 'Click a pin, then another pin, to wire them. Alt-click a pin to disconnect it.' }, help);
+    var keys = el('p', {}, help);
+    el('kbd', { text: 'Del' }, keys);
+    keys.appendChild(document.createTextNode(' remove · '));
+    el('kbd', { text: 'F' }, keys);
+    keys.appendChild(document.createTextNode(' fit · '));
+    el('kbd', { text: 'V' }, keys);
+    keys.appendChild(document.createTextNode(' select · '));
+    el('kbd', { text: 'Space' }, keys);
+    keys.appendChild(document.createTextNode(' pan'));
   }
 
   function syncPalette() {
@@ -437,11 +444,46 @@
     }
   }
 
+  function drawGrid(world) {
+    var rect = $('#canvas').getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return;
+    var z = state.view.z || 1;
+    var x0 = -state.view.x / z;
+    var y0 = -state.view.y / z;
+    var x1 = (rect.width - state.view.x) / z;
+    var y1 = (rect.height - state.view.y) / z;
+    var step = z < 0.5 ? 32 : (z > 1.75 ? 8 : 16);
+    var major = step * 4;
+    var left = Math.floor(x0 / step) * step;
+    var top = Math.floor(y0 / step) * step;
+    var right = x1 + step;
+    var bottom = y1 + step;
+    var minor = '';
+    var majorD = '';
+    var x, y, n;
+    n = 0;
+    for (x = left; x <= right && n < 240; x += step, n++) {
+      var seg = 'M' + x + ' ' + top + 'V' + bottom + ' ';
+      if (Math.abs(x / major - Math.round(x / major)) < 1e-6) majorD += seg;
+      else minor += seg;
+    }
+    n = 0;
+    for (y = top; y <= bottom && n < 240; y += step, n++) {
+      var segY = 'M' + left + ' ' + y + 'H' + right + ' ';
+      if (Math.abs(y / major - Math.round(y / major)) < 1e-6) majorD += segY;
+      else minor += segY;
+    }
+    var g = svgEl('g', { 'pointer-events': 'none' }, world);
+    svgEl('path', { d: minor, fill: 'none', stroke: '#e3ebf4', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }, g);
+    svgEl('path', { d: majorD, fill: 'none', stroke: '#d2deea', 'stroke-width': 1.15, 'vector-effect': 'non-scaling-stroke' }, g);
+  }
+
   function renderCanvas() {
     var world = $('#world');
     var v = state.view;
     world.setAttribute('transform', 'translate(' + v.x + ' ' + v.y + ') scale(' + v.z + ')');
     while (world.firstChild) world.removeChild(world.firstChild);
+    drawGrid(world);
     var mod = active();
     if (!mod) return;
     var lab = state.report && state.report.labels[mod.id];
@@ -465,11 +507,11 @@
       var hot = state.hover && state.hover.net === net.id;
       svgEl('path', { d: d, fill: 'none', stroke: 'transparent', 'stroke-width': 12, 'data-net': net.id }, world);
       svgEl('path', {
-        d: d, fill: 'none', stroke: on || hot ? '#1d6fe0' : '#5c6778',
-        'stroke-width': on ? 2.3 : 1.5, 'stroke-linecap': 'square', 'pointer-events': 'none'
+        d: d, fill: 'none', stroke: on || hot ? '#1d6fe0' : '#3e4c60',
+        'stroke-width': on ? 2.4 : 1.6, 'stroke-linecap': 'square', 'stroke-linejoin': 'miter', 'pointer-events': 'none'
       }, world);
       routed.dots.forEach(function (dot) {
-        svgEl('circle', { cx: dot[0], cy: dot[1], r: 2.5, fill: on ? '#1d6fe0' : '#243044', 'pointer-events': 'none' }, world);
+        svgEl('circle', { cx: dot[0], cy: dot[1], r: on ? 3.1 : 2.6, fill: on ? '#1d6fe0' : '#243044', stroke: '#f5f8fb', 'stroke-width': 1, 'pointer-events': 'none' }, world);
       });
       var info = lab && lab.nets[net.id];
       var label = info ? (info.vname || info.expr || '') : (net.name || '');
@@ -478,8 +520,12 @@
         svgText({
           x: (mid[0] + mid[2]) / 2,
           y: Math.min(mid[1], mid[3]) - 4,
-          'font-size': 10,
-          fill: '#8b95a3',
+          'font-size': 11,
+          fill: '#5c6b7e',
+          stroke: '#f5f8fb',
+          'stroke-width': 3,
+          'paint-order': 'stroke',
+          'stroke-linejoin': 'round',
           'font-family': 'Segoe UI, sans-serif',
           'pointer-events': 'none'
         }, label, world);
@@ -504,8 +550,8 @@
       var selected = state.sel && state.sel.kind === 'part' && state.sel.id === part.id;
       if (selected) {
         svgEl('rect', {
-          x: -3, y: -3, width: m.w + 6, height: m.h + 6, rx: 4,
-          fill: 'none', stroke: '#1d6fe0', 'stroke-width': 2, 'pointer-events': 'none'
+          x: -6, y: -6, width: m.w + 12, height: m.h + 12, rx: 7,
+          fill: 'rgba(29,111,224,0.08)', stroke: '#1d6fe0', 'stroke-width': 1.6, 'pointer-events': 'none'
         }, g);
       }
       svgEl('rect', { x: 0, y: 0, width: m.w, height: m.h, fill: 'transparent', 'data-part': part.id }, g);
@@ -545,108 +591,13 @@
     }
   }
 
-  function currentTex() {
-    if (state.tikzDirty && $('#tikz')) return $('#tikz').value;
-    return (typeof CircuitTikZ !== 'undefined' && state.doc) ? CircuitTikZ.toTex(state.doc) : '';
-  }
-
   function renderCode() {
-    $('#verilog').value = (state.report && state.report.verilog) || '';
-    var tikz = $('#tikz');
-    if (tikz && !state.tikzDirty && document.activeElement !== tikz && typeof CircuitTikZ !== 'undefined' && state.doc) {
-      tikz.value = CircuitTikZ.toTex(state.doc);
-    }
-  }
-
-  function showCodeTab(which) {
-    state.codeTab = which === 'tikz' ? 'tikz' : 'verilog';
-    var tikzOn = state.codeTab === 'tikz';
-    $('#verilog').hidden = tikzOn;
-    $('#tikz').hidden = !tikzOn;
-    $('#tabVerilog').classList.toggle('on', !tikzOn);
-    $('#tabTikz').classList.toggle('on', tikzOn);
-    $('#tikzApply').hidden = !tikzOn;
-    $('#texDown').hidden = !tikzOn;
-    if (tikzOn) renderCode();
-  }
-
-  function applyTikz() {
-    if (typeof CircuitTikZ === 'undefined') { toast('CircuiTikZ converter did not load'); return; }
-    var out = CircuitTikZ.fromTex($('#tikz').value);
-    if (!out.doc || !out.doc.modules || !out.doc.modules.length) {
-      toast('No CircuiTikZ picture in that text');
-      return;
-    }
-    pushUndo();
-    state.doc = out.doc;
-    state.notes = out.warnings || [];
-    state.sel = null;
-    state.tool = '';
-    state.wiring = null;
-    state.tikzDirty = false;
-    syncPalette();
-    onDocChange();
-    requestAnimationFrame(fit);
-    toast(out.warnings && out.warnings.length ? 'Drawing updated, with notes' : 'Drawing updated from CircuiTikZ');
-  }
-
-  function postPdf(url, tex) {
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain; charset=utf-8' },
-      body: tex
-    }).then(function (res) {
-      if (!res.ok) return res.text().then(function (t) { throw new Error(t || ('Compiler returned ' + res.status)); });
-      return res.blob();
-    });
-  }
-
-  function compilePdf(tex) {
-    var urls = [];
-    if (location.protocol !== 'file:') {
-      try { urls.push(new URL('/compile', location.href).href); } catch (err) { /* ignore */ }
-    }
-    urls.push('http://127.0.0.1:8757/compile');
-    var seen = Object.create(null);
-    var chain = Promise.reject(new Error('offline'));
-    urls.forEach(function (url) {
-      if (seen[url]) return;
-      seen[url] = 1;
-      chain = chain.catch(function () { return postPdf(url, tex); });
-    });
-    return chain.catch(function (err) {
-      var msg = err && err.message ? err.message : '';
-      if (!msg || /offline|failed to fetch|networkerror|load failed|network error/i.test(msg)) {
-        throw new Error('The PDF compiler is not running. Start it with bash run.sh, open http://127.0.0.1:8757/designer.html, and click PDF again.');
-      }
-      throw err;
-    });
-  }
-
-  function downloadTex() {
-    var tex = currentTex();
-    download((active().name || 'circuit') + '.tex', tex, 'application/x-tex');
-    toast('Downloaded ' + (active().name || 'circuit') + '.tex');
-  }
-
-  function exportPdf() {
-    var tex = currentTex();
-    var btn = $('#pdf');
-    btn.disabled = true;
-    var label = btn.textContent;
-    btn.textContent = 'PDF…';
-    compilePdf(tex).then(function (blob) {
-      download((active().name || 'circuit') + '.pdf', blob, 'application/pdf');
-      toast('PDF saved');
-    }).catch(function (err) {
-      download((active().name || 'circuit') + '.tex', tex, 'text/plain');
-      var msg = (err && err.message) ? err.message : 'Compile failed';
-      if (msg.length > 180) msg = msg.slice(-180);
-      toast('Saved the .tex. ' + msg);
-    }).then(function () {
-      btn.disabled = false;
-      btn.textContent = label;
-    });
+    var text = (state.report && state.report.verilog) || '';
+    $('#verilog').value = text;
+    var stat = $('#codestat');
+    if (!stat) return;
+    var lines = text ? text.replace(/\n$/, '').split('\n').length : 0;
+    stat.textContent = lines ? (lines + (lines === 1 ? ' line' : ' lines')) : '';
   }
 
   function allIssues() {
@@ -663,7 +614,9 @@
   function renderIssues() {
     var host = $('#issues');
     while (host.firstChild) host.removeChild(host.firstChild);
-    allIssues().forEach(function (issue) {
+    var issues = allIssues();
+    host.hidden = !issues.length;
+    issues.forEach(function (issue) {
       var row = el('div', { class: 'issue ' + (issue.level === 'error' ? 'error' : 'warn'), text: issue.msg }, host);
       row.addEventListener('click', function () {
         if (issue.moduleId && issue.moduleId !== state.doc.active) {
@@ -687,7 +640,7 @@
     var errors = issues.filter(function (i) { return i.level === 'error'; }).length;
     var warns = issues.length - errors;
     var badge = $('#badge');
-    badge.className = 'badge';
+    badge.className = 'chip badge';
     if (!state.viewer || !state.viewer.ok) {
       badge.classList.add('bad');
       badge.textContent = 'Viewer rejected it';
@@ -699,9 +652,17 @@
       badge.textContent = 'Viewer can draw this';
     }
     var hint = $('#hint');
-    if (state.wiring) hint.textContent = 'Click a pin to finish the wire. Esc cancels.';
-    else if (state.tool) hint.textContent = 'Click the canvas to place ' + toolLabel(state.tool) + '. Shift keeps the tool.';
-    else hint.textContent = 'Wire pin to pin. Drag a part to move it. Drag empty space to pan.';
+    if (state.wiring) {
+      hint.hidden = false;
+      hint.textContent = 'Click a pin to connect. Esc cancels.';
+    } else if (state.tool) {
+      hint.hidden = false;
+      hint.textContent = 'Click to place ' + toolLabel(state.tool) + '. Shift keeps the tool.';
+    } else {
+      hint.hidden = true;
+      hint.textContent = '';
+    }
+    $('#canvas').classList.toggle('wire', !!state.wiring);
     $('#zoom').textContent = Math.round(state.view.z * 100) + '%';
   }
 
@@ -711,9 +672,17 @@
     state.doc.modules.forEach(function (mod) {
       var b = el('button', {
         type: 'button',
-        class: 'tab' + (mod.id === state.doc.active ? ' on' : ''),
-        text: mod.name || 'module'
+        class: 'tab' + (mod.id === state.doc.active ? ' on' : '')
       }, host);
+      b.appendChild(document.createTextNode(mod.name || 'module'));
+      if (state.doc.modules.length > 1) {
+        var x = el('span', { class: 'x', title: 'Delete module', text: '\u00d7' }, b);
+        x.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          deleteModule(mod.id);
+        });
+      }
       b.addEventListener('click', function () {
         if (state.doc.active === mod.id) return;
         state.doc.active = mod.id;
@@ -779,7 +748,7 @@
       el('h2', { text: mod.name || 'Module' }, host);
       el('p', {
         class: 'note',
-        text: 'This drawing exports structural Verilog. The schematic viewer lowers those primitives, mux assigns, and flip-flop always blocks back into the same symbols.'
+        text: 'The drawing exports structural Verilog as you edit it. Preview checks that the schematic viewer can read it back.'
       }, host);
       var ports = mod.parts.filter(function (p) { return p.type === 'in' || p.type === 'out'; });
       if (!ports.length) el('p', { class: 'note', text: 'Add inputs and outputs from the palette. They become the module ports.' }, host);
@@ -787,7 +756,7 @@
         var list = el('div', { class: 'pins' }, host);
         ports.slice().sort(function (a, b) { return a.y - b.y || a.x - b.x; }).forEach(function (p) {
           var row = el('div', { class: 'pinrow' }, list);
-          el('em', { text: p.type === 'in' ? 'in' : 'out' }, row);
+          el('em', { class: p.type, text: p.type === 'in' ? 'in' : 'out' }, row);
           el('span', { text: (lab && lab.ports[p.id]) || p.name }, row);
         });
       }
@@ -927,7 +896,10 @@
       el('em', { text: pin.name }, row);
       var net = netContaining(part.id, pin.name);
       var info = net && lab && lab.nets[net.id];
-      var span = el('span', { text: net ? ((info && (info.vname || info.expr)) || 'connected') : 'open' }, row);
+      var span = el('span', {
+        class: net ? 'netlive' : 'netopen',
+        text: net ? ((info && (info.vname || info.expr)) || 'connected') : 'open'
+      }, row);
       span.style.flex = '1';
       if (net) {
         var b = el('button', { type: 'button', class: 'mini', text: 'Disconnect' }, row);
@@ -1167,6 +1139,28 @@
     state.view.y = rect.height / 2 - cy * state.view.z;
   }
 
+  function zoomAround(z) {
+    var rect = $('#canvas').getBoundingClientRect();
+    var cx = rect.width / 2;
+    var cy = rect.height / 2;
+    var prev = state.view.z || 1;
+    var wx = (cx - state.view.x) / prev;
+    var wy = (cy - state.view.y) / prev;
+    state.view.z = z;
+    state.view.x = cx - wx * z;
+    state.view.y = cy - wy * z;
+    renderCanvas();
+    renderStatus();
+    saveSoon();
+  }
+
+  function zoomBy(factor) {
+    var z = (state.view.z || 1) * factor;
+    if (z < 0.25) z = 0.25;
+    if (z > 2.4) z = 2.4;
+    zoomAround(z);
+  }
+
   function fit() {
     var mod = active();
     var rect = $('#canvas').getBoundingClientRect();
@@ -1185,13 +1179,12 @@
       if (p.x + m.w > x1) x1 = p.x + m.w;
       if (p.y + m.h + 18 > y1) y1 = p.y + m.h + 18;
     });
-    var pad = 64;
-    var z = Math.min((rect.width - pad) / Math.max(1, x1 - x0), (rect.height - pad - 28) / Math.max(1, y1 - y0));
+    var z = Math.min((rect.width - 88) / Math.max(1, x1 - x0), (rect.height - 120) / Math.max(1, y1 - y0));
     if (!isFinite(z) || z <= 0) z = 1;
     z = Math.max(0.25, Math.min(1.7, z));
     state.view.z = z;
     state.view.x = (rect.width - (x1 - x0) * z) / 2 - x0 * z;
-    state.view.y = (rect.height - (y1 - y0) * z) / 2 - y0 * z;
+    state.view.y = (rect.height - (y1 - y0) * z) / 2 - y0 * z - 8;
     renderCanvas();
     renderStatus();
     saveSoon();
@@ -1461,7 +1454,6 @@
     pushUndo();
     state.doc = out.doc;
     state.notes = out.warnings || [];
-    state.tikzDirty = false;
     state.sel = null;
     state.tool = '';
     state.wiring = null;
@@ -1474,22 +1466,6 @@
   function openFileText(text, filename) {
     var trimmed = String(text || '').trim();
     if (!trimmed) return;
-    if (/\\begin\{circuitikz\}|\\usepackage(\[[^\]]*\])?\{circuitikz\}/.test(text) && typeof CircuitTikZ !== 'undefined') {
-      var drawn = CircuitTikZ.fromTex(text);
-      if (drawn.doc && drawn.doc.modules && drawn.doc.modules.length && drawn.doc.modules[0].parts) {
-        pushUndo();
-        state.doc = drawn.doc;
-        state.notes = drawn.warnings || [];
-        state.sel = null;
-        state.tikzDirty = false;
-        onDocChange();
-        closeSheet();
-        requestAnimationFrame(fit);
-        showCodeTab('tikz');
-        toast('Opened CircuiTikZ');
-        return;
-      }
-    }
     if (trimmed.charAt(0) === '{' || /\.json$/i.test(filename || '')) {
       try {
         var data = JSON.parse(text);
@@ -1555,6 +1531,9 @@
     $('#redo').addEventListener('click', redo);
     $('#del').addEventListener('click', deleteSelection);
     $('#fit').addEventListener('click', fit);
+    $('#zin').addEventListener('click', function () { zoomBy(1.12); });
+    $('#zout').addEventListener('click', function () { zoomBy(1 / 1.12); });
+    $('#zoom').addEventListener('click', function () { zoomAround(1); });
     $('#preview').addEventListener('click', openPreview);
     $('#imp').addEventListener('click', openImport);
     $('#sheetClose').addEventListener('click', closeSheet);
@@ -1568,11 +1547,10 @@
       }
     });
     $('#copy').addEventListener('click', function () {
-      var box = state.codeTab === 'tikz' ? $('#tikz') : $('#verilog');
+      var box = $('#verilog');
       var text = box ? box.value : '';
-      var label = state.codeTab === 'tikz' ? 'CircuiTikZ' : 'Verilog';
       if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { toast('Copied ' + label); }, function () {
+        navigator.clipboard.writeText(text).then(function () { toast('Copied Verilog'); }, function () {
           box.focus();
           box.select();
           toast('Select the text and copy it');
@@ -1580,17 +1558,10 @@
       } else {
         box.focus();
         box.select();
-        try { document.execCommand('copy'); toast('Copied ' + label); }
+        try { document.execCommand('copy'); toast('Copied Verilog'); }
         catch (err) { toast('Select the text and copy it'); }
       }
     });
-    $('#tabVerilog').addEventListener('click', function () { showCodeTab('verilog'); });
-    $('#tabTikz').addEventListener('click', function () { showCodeTab('tikz'); });
-    $('#tikzApply').addEventListener('click', applyTikz);
-    $('#tex').addEventListener('click', downloadTex);
-    $('#texDown').addEventListener('click', downloadTex);
-    $('#pdf').addEventListener('click', exportPdf);
-    $('#tikz').addEventListener('input', function () { state.tikzDirty = true; });
     $('#exp').addEventListener('click', function () {
       var name = (active().name || 'schematic') + '.v';
       download(name, state.report ? state.report.verilog : '', 'text/plain');
@@ -1622,7 +1593,6 @@
       state.tool = '';
       state.wiring = null;
       state.notes = [];
-      state.tikzDirty = false;
       syncPalette();
       onDocChange();
       requestAnimationFrame(fit);
@@ -1681,6 +1651,8 @@
         e.preventDefault();
         download((active().name || 'schematic') + '.json', JSON.stringify({ doc: state.doc, view: state.view }, null, 2), 'application/json');
       } else if (key === 'f') fit();
+      else if (key === '=' || key === '+') zoomBy(1.12);
+      else if (key === '-' || key === '_') zoomBy(1 / 1.12);
       else if (key === 'v') {
         state.tool = '';
         syncPalette();
