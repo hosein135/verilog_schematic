@@ -31,7 +31,8 @@
     report: null,
     viewer: null,
     notes: [],
-    space: false
+    space: false,
+    tex: { style: 'american', scope: 'active', dirty: false, busy: false }
   };
   var saveTimer = null;
   var toastTimer = null;
@@ -1377,6 +1378,177 @@
   function closeSheet() {
     $('#modal').hidden = true;
     state.preview = null;
+    setTexMode(false);
+  }
+
+  function setTexMode(on) {
+    var bar = $('#texBar');
+    var st = $('#texStyle');
+    var sc = $('#texScope');
+    if (bar) bar.hidden = !on;
+    if (st) st.hidden = !on;
+    if (sc) sc.hidden = !on;
+  }
+
+  function texStatus(msg) {
+    var node = $('#texStatus');
+    if (node) node.textContent = msg || '';
+  }
+
+  function currentTex() {
+    var ta = $('#texArea');
+    return ta ? ta.value : '';
+  }
+
+  function rememberTexStyle() {
+    try { localStorage.setItem('verilog-schematic-designer-tex', state.tex.style); } catch (err) { /* private mode */ }
+  }
+
+  function fillTex(force) {
+    var ta = $('#texArea');
+    if (!ta || typeof CircuiTikZ === 'undefined') return;
+    if (state.tex.dirty && !force) {
+      if (!window.confirm('Replace the edited CircuiTikZ with the drawing?')) return;
+    }
+    var out = CircuiTikZ.toTex(state.doc, { style: state.tex.style, scope: state.tex.scope });
+    ta.value = out.tex;
+    state.tex.dirty = false;
+    texStatus((out.warnings && out.warnings.length) ? out.warnings[0] : 'Edit this TeX, then convert it back or download a PDF.');
+  }
+
+  function openTex() {
+    if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return; }
+    var modal = $('#modal');
+    modal.hidden = false;
+    $('#sheet').classList.remove('compact');
+    $('#importBar').hidden = true;
+    $('#sheetMod').hidden = true;
+    $('#sheetTitle').textContent = 'CircuiTikZ';
+    setTexMode(true);
+    var body = $('#sheetBody');
+    clearNode(body);
+    var ta = el('textarea', { id: 'texArea', class: 'tex', spellcheck: 'false' }, body);
+    ta.addEventListener('input', function () { state.tex.dirty = true; });
+    $('#texStyle').value = state.tex.style;
+    $('#texScope').value = state.tex.scope;
+    fillTex(true);
+    setTimeout(function () { ta.focus(); }, 30);
+  }
+
+  function importTex(src) {
+    if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return false; }
+    var out = CircuiTikZ.fromTex(src);
+    if (!out.doc) {
+      var msg = out.error || 'That TeX did not convert';
+      texStatus(msg);
+      toast(msg);
+      return false;
+    }
+    pushUndo();
+    state.doc = out.doc;
+    state.notes = out.warnings || [];
+    state.sel = null;
+    state.tool = '';
+    state.wiring = null;
+    syncPalette();
+    onDocChange();
+    requestAnimationFrame(fit);
+    return true;
+  }
+
+  function texLogLine(log) {
+    var lines = String(log || '').split(/\r?\n/);
+    var i;
+    var m;
+    for (i = 0; i < lines.length; i++) {
+      m = /^\.\/[^:]*:(\d+): (.*)$/.exec(lines[i]);
+      if (m) return 'line ' + m[1] + ': ' + m[2];
+      m = /^! (.*)$/.exec(lines[i]);
+      if (m) return m[1];
+    }
+    return '';
+  }
+
+  function downloadPdf() {
+    if (state.tex.busy) return;
+    if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return; }
+    if (typeof fetch !== 'function') {
+      texStatus('This browser cannot compile PDF here. Use Open on TeXLive.net.');
+      return;
+    }
+    var tex = CircuiTikZ.wrapDocument(currentTex());
+    state.tex.busy = true;
+    $('#texPdf').disabled = true;
+    var t0 = Date.now();
+    texStatus('Compiling on latex.ytotech.com (sends this TeX to a third-party server)...');
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 60000);
+    var opts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ compiler: 'pdflatex', resources: [{ main: true, content: tex }] })
+    };
+    if (ctrl) opts.signal = ctrl.signal;
+    fetch('https://latex.ytotech.com/builds/sync', opts).then(function (res) {
+      clearTimeout(timer);
+      var ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (ct.indexOf('pdf') >= 0) return res.blob().then(function (blob) { return { blob: blob }; });
+      return res.text().then(function (text) {
+        var msg = 'PDF compile failed (' + res.status + ')';
+        try {
+          var parsed = JSON.parse(text);
+          var log = '';
+          if (parsed.log_files) {
+            log = parsed.log_files['__main_document__.log'] || '';
+            if (!log) {
+              var keys = Object.keys(parsed.log_files);
+              if (keys.length) log = parsed.log_files[keys[0]];
+            }
+          }
+          var line = texLogLine(log);
+          if (line) msg = line;
+          else if (parsed.error) msg = String(parsed.error);
+        } catch (err) { /* keep msg */ }
+        throw new Error(msg);
+      });
+    }).then(function (got) {
+      download((active().name || 'schematic') + '.pdf', got.blob, 'application/pdf');
+      var kb = Math.max(1, Math.round(got.blob.size / 1024));
+      var sec = ((Date.now() - t0) / 1000).toFixed(1);
+      texStatus('Downloaded ' + kb + ' KB PDF in ' + sec + ' s.');
+    }, function (err) {
+      clearTimeout(timer);
+      var msg = (err && err.name === 'AbortError') ? 'PDF compile timed out.' : ((err && err.message) || 'PDF compile failed.');
+      texStatus(msg + ' You can use Open on TeXLive.net instead.');
+    }).then(function () {
+      state.tex.busy = false;
+      var btn = $('#texPdf');
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  function openTexLive() {
+    if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return; }
+    var form = document.createElement('form');
+    form.method = 'post';
+    form.enctype = 'multipart/form-data';
+    form.target = '_blank';
+    form.action = 'https://texlive.net/cgi-bin/latexcgi';
+    form.style.display = 'none';
+    function field(name, value, tag) {
+      var input = document.createElement(tag || 'input');
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    field('filecontents[]', CircuiTikZ.wrapDocument(currentTex()), 'textarea');
+    field('filename[]', 'document.tex');
+    field('engine', 'pdflatex');
+    field('return', 'pdf');
+    document.body.appendChild(form);
+    form.submit();
+    form.remove();
+    texStatus('Opened TeXLive.net in a new tab. That also sends this TeX to a third-party server.');
   }
 
   function clearNode(node) {
@@ -1391,6 +1563,7 @@
     modal.hidden = false;
     $('#sheet').classList.remove('compact');
     $('#importBar').hidden = true;
+    setTexMode(false);
     $('#sheetTitle').textContent = 'Schematic viewer';
     var body = $('#sheetBody');
     clearNode(body);
@@ -1430,11 +1603,12 @@
     modal.hidden = false;
     $('#sheet').classList.add('compact');
     $('#importBar').hidden = false;
+    setTexMode(false);
     $('#sheetTitle').textContent = 'Import Verilog';
     $('#sheetMod').hidden = true;
     var body = $('#sheetBody');
     clearNode(body);
-    var ta = el('textarea', { id: 'importText', placeholder: 'Paste Verilog. Gates, mux assigns, and flip-flop always blocks become a drawing.' }, body);
+    var ta = el('textarea', { id: 'importText', placeholder: 'Paste Verilog or CircuiTikZ. Gates, mux assigns, flip-flop always blocks, and CircuiTikZ nodes become a drawing.' }, body);
     if (!$('#importFile')) {
       var b = el('button', { type: 'button', id: 'importFile', text: 'Open file' });
       b.addEventListener('click', function () { $('#file').click(); });
@@ -1450,7 +1624,7 @@
     c.order.forEach(function (name) {
       try { Schematic.layout(c.modules[name]); } catch (err) { /* grid fallback */ }
     });
-    var out = Design.fromCompiled(c);
+    var out = Design.fromCompiled(c, { externals: Design.externalStubs(src) });
     pushUndo();
     state.doc = out.doc;
     state.notes = out.warnings || [];
@@ -1483,6 +1657,13 @@
         toast('Opened drawing');
       } catch (err) {
         toast('Could not read that drawing');
+      }
+      return;
+    }
+    if (typeof CircuiTikZ !== 'undefined' && (CircuiTikZ.looksLikeTex(text) || /\.(tex|tikz|pgf)$/i.test(filename || ''))) {
+      if (importTex(text)) {
+        closeSheet();
+        toast('Imported CircuiTikZ');
       }
       return;
     }
@@ -1541,11 +1722,51 @@
     $('#sheetMod').addEventListener('change', function () { drawPreview($('#sheetMod').value); });
     $('#importGo').addEventListener('click', function () {
       var ta = $('#importText');
-      if (ta && importVerilog(ta.value)) {
+      if (!ta) return;
+      if (typeof CircuiTikZ !== 'undefined' && CircuiTikZ.looksLikeTex(ta.value)) {
+        if (importTex(ta.value)) {
+          closeSheet();
+          toast('Imported CircuiTikZ');
+        }
+        return;
+      }
+      if (importVerilog(ta.value)) {
         closeSheet();
         toast('Imported Verilog');
       }
     });
+    if ($('#tex')) $('#tex').addEventListener('click', openTex);
+    if ($('#texRegen')) $('#texRegen').addEventListener('click', function () { fillTex(false); });
+    if ($('#texCopy')) $('#texCopy').addEventListener('click', function () {
+      var text = currentTex();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { toast('Copied CircuiTikZ'); }, function () { toast('Select the text and copy it'); });
+      } else toast('Select the text and copy it');
+    });
+    if ($('#texSave')) $('#texSave').addEventListener('click', function () {
+      download((active().name || 'schematic') + '.tex', currentTex(), 'text/plain');
+    });
+    if ($('#texPdf')) $('#texPdf').addEventListener('click', downloadPdf);
+    if ($('#texOnline')) $('#texOnline').addEventListener('click', openTexLive);
+    if ($('#texToSch')) $('#texToSch').addEventListener('click', function () {
+      if (importTex(currentTex())) {
+        closeSheet();
+        toast('Converted CircuiTikZ');
+      }
+    });
+    function applyTexOpt(kind) {
+      var sel = kind === 'style' ? $('#texStyle') : $('#texScope');
+      var prev = state.tex[kind];
+      if (state.tex.dirty && !window.confirm('Replace the edited CircuiTikZ with the drawing?')) {
+        sel.value = prev;
+        return;
+      }
+      state.tex[kind] = sel.value;
+      if (kind === 'style') rememberTexStyle();
+      fillTex(true);
+    }
+    if ($('#texStyle')) $('#texStyle').addEventListener('change', function () { applyTexOpt('style'); });
+    if ($('#texScope')) $('#texScope').addEventListener('change', function () { applyTexOpt('scope'); });
     $('#copy').addEventListener('click', function () {
       var box = $('#verilog');
       var text = box ? box.value : '';
@@ -1687,6 +1908,10 @@
     } else {
       state.doc = Design.example('half');
     }
+    try {
+      var texStyle = localStorage.getItem('verilog-schematic-designer-tex');
+      if (texStyle === 'european' || texStyle === 'ieeestd' || texStyle === 'american') state.tex.style = texStyle;
+    } catch (err2) { /* keep american */ }
     syncPalette();
     onDocChange();
     requestAnimationFrame(function () {

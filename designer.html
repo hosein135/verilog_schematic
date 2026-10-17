@@ -499,6 +499,19 @@
     line-height: 1.5;
     background: #fff;
   }
+  #sheetBody textarea.tex {
+    height: calc(100% - 24px);
+    white-space: pre;
+    overflow: auto;
+  }
+  #texBar { flex-wrap: wrap; }
+  #texStatus {
+    margin-right: auto;
+    max-width: min(420px, 46%);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.35;
+  }
   #sheetBody .err { color: var(--bad); padding: 16px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; }
   .importbar {
     display: flex;
@@ -568,6 +581,7 @@
       <button id="save" type="button" title="Save the drawing (Ctrl+S)">Save</button>
     </div>
     <button id="exp" type="button" title="Download the generated Verilog">Export .v</button>
+    <button id="tex" type="button" title="Convert the drawing to CircuiTikZ (LaTeX) and back">CircuiTikZ</button>
     <button id="openSim" type="button" class="ghost" title="Open this Verilog in the simulator">Simulate</button>
     <button id="preview" type="button" class="primary" title="Draw this Verilog with the schematic viewer">Preview</button>
   </div>
@@ -614,6 +628,15 @@
     <div class="sheetbar">
       <b id="sheetTitle">Viewer</b>
       <select id="sheetMod" hidden></select>
+      <select id="texStyle" class="ex" hidden title="Logic port style">
+        <option value="american">American</option>
+        <option value="european">European</option>
+        <option value="ieeestd">IEEE</option>
+      </select>
+      <select id="texScope" class="ex" hidden title="Which modules to export">
+        <option value="active">This module</option>
+        <option value="all">All modules</option>
+      </select>
       <span class="spacer"></span>
       <button id="sheetClose" type="button">Close</button>
     </div>
@@ -621,11 +644,21 @@
     <div class="importbar" id="importBar" hidden>
       <button id="importGo" type="button" class="primary">Import into the drawing</button>
     </div>
+    <div class="importbar" id="texBar" hidden>
+      <span id="texStatus"></span>
+      <button id="texRegen" type="button">From drawing</button>
+      <button id="texCopy" type="button">Copy</button>
+      <button id="texSave" type="button">Download .tex</button>
+      <button id="texOnline" type="button" title="Compile on TeXLive.net in a new tab. Sends this TeX to a third-party server.">Open on TeXLive.net</button>
+      <button id="texPdf" type="button" class="ghost" title="Compile with pdflatex on latex.ytotech.com and download the PDF. Sends this TeX to a third-party server.">Download PDF</button>
+      <button id="texToSch" type="button" class="primary">Convert to schematic</button>
+    </div>
   </div>
 </div>
-<input id="file" type="file" accept=".json,.v,.sv,.vh,.txt,application/json,text/plain" hidden>
+<input id="file" type="file" accept=".json,.v,.sv,.vh,.txt,.tex,.tikz,.pgf,application/json,text/plain" hidden>
 <script src="schematic.js"></script>
 <script src="design.js"></script>
+<script src="circuitikz.js"></script>
 <script src="designer.js"></script>
 </body>
 </html>

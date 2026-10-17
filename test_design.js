@@ -233,10 +233,188 @@ roundTrip('import count', CT, function (c, c2) {
   expect(cellKind(b, 'not').length === cellKind(a, 'not').length, 'rt not ' + cellKind(b, 'not').length);
 });
 
+function imported(src) {
+  var c = Sch.compile(src);
+  expect(c.ok, 'import compile ' + (c.error || ''));
+  if (!c.ok) return null;
+  c.order.forEach(function (n) { Sch.layout(c.modules[n]); });
+  return Design.fromCompiled(c, { externals: Design.externalStubs(src) });
+}
+
+(function netNames() {
+  var out = imported(FA);
+  if (!out) return;
+  var fa = out.doc.modules.filter(function (m) { return m.name === 'full_adder'; })[0];
+  var names = {};
+  fa.nets.forEach(function (n) { if (n.name) names[n.name] = 1; });
+  expect(names.s1 && names.c1 && names.c2, 'kept wire names ' + Object.keys(names).join(','));
+})();
+
+function wideSrc(kind, n, yName) {
+  var letters = 'abcdefghijklmnopqrstuvwxyz';
+  var ins = [];
+  var i;
+  for (i = 0; i < n; i++) ins.push(letters.charAt(i));
+  return 'module wide(input ' + ins.join(', input ') + ', output ' + yName + ');\n  ' +
+    kind + ' (' + yName + ', ' + ins.join(', ') + ');\nendmodule\n';
+}
+
+function driverPart(mod, outName) {
+  var outp = mod.parts.filter(function (p) { return p.type === 'out' && p.name === outName; })[0];
+  if (!outp) return null;
+  var net = mod.nets.filter(function (n) {
+    return n.pins.some(function (r) { return r.part === outp.id; });
+  })[0];
+  if (!net) return null;
+  var hit = null;
+  net.pins.forEach(function (r) {
+    if (r.pin === 'Y' || r.pin === 'Q') {
+      mod.parts.forEach(function (p) { if (p.id === r.part) hit = p; });
+    }
+  });
+  return hit;
+}
+
+(function wideGates() {
+  [['and', 'and', 'and'], ['nand', 'nand', 'and'], ['xnor', 'xnor', 'xor']].forEach(function (spec) {
+    [9, 12].forEach(function (n) {
+      var out = imported(wideSrc(spec[0], n, 'y'));
+      if (!out) return;
+      var mod = out.doc.modules[0];
+      var ins = mod.parts.filter(function (p) { return p.type === 'in'; });
+      expect(ins.length === n, spec[0] + ' ' + n + ' ports ' + ins.length);
+      ins.forEach(function (p) {
+        var net = mod.nets.filter(function (nn) {
+          return nn.pins.some(function (r) { return r.part === p.id; });
+        })[0];
+        expect(net && net.pins.length >= 2, spec[0] + ' ' + n + ' connects ' + p.name);
+      });
+      var root = driverPart(mod, 'y');
+      expect(root && root.type === spec[1], spec[0] + ' ' + n + ' root ' + (root && root.type));
+      var inner = mod.parts.filter(function (p) { return p.type === spec[2] && (!root || p.id !== root.id); });
+      expect(inner.length >= 1, spec[0] + ' ' + n + ' inner ' + spec[2]);
+    });
+  });
+  var one = imported('module one(input a, output y, output z);\n  and (y, a);\n  nand (z, a);\nendmodule\n');
+  if (one) {
+    var kinds = {};
+    one.doc.modules[0].parts.forEach(function (p) { kinds[p.type] = (kinds[p.type] || 0) + 1; });
+    expect(kinds.buf === 1, '1-input and is buf ' + JSON.stringify(kinds));
+    expect(kinds.not === 1, '1-input nand is not ' + JSON.stringify(kinds));
+    expect(!kinds.and && !kinds.nand, '1-input primitives are not gates');
+  }
+})();
+
+(function reserved() {
+  var doc = {
+    v: 1, seq: 8, active: 'm1',
+    modules: [{
+      id: 'm1', name: 'kw',
+      parts: [
+        { id: 'a', type: 'in', name: 'case', x: 0, y: 0 },
+        { id: 'b', type: 'in', name: 'initial', x: 0, y: 40 },
+        { id: 'c', type: 'in', name: 'logic', x: 0, y: 80 },
+        { id: 'd', type: 'in', name: '$x', x: 0, y: 120 },
+        { id: 'y', type: 'out', name: 'y', x: 200, y: 40 }
+      ],
+      nets: [
+        { id: 'n1', name: '', pins: [{ part: 'a', pin: 'Y' }, { part: 'y', pin: 'A' }] }
+      ]
+    }]
+  };
+  var v = Design.toVerilog(doc);
+  expect(v.indexOf('input case_n') >= 0, 'case_n\n' + v);
+  expect(v.indexOf('input initial_n') >= 0, 'initial_n\n' + v);
+  expect(v.indexOf('input logic_n') >= 0, 'logic_n\n' + v);
+  expect(v.indexOf('input n_$x') >= 0, 'dollar\n' + v);
+  expect(Sch.compile(v).ok, 'reserved compiles\n' + v);
+})();
+
+function extDoc(blocks) {
+  var parts = [{ id: 'a', type: 'in', name: 'a', x: 0, y: 0 }];
+  var nets = [];
+  var seq = 2;
+  blocks.forEach(function (b, i) {
+    parts.push({
+      id: b.id, type: 'block', name: b.id, x: 160, y: i * 120,
+      ref: '', ext: b.ext, ports: b.ports
+    });
+    b.ports.forEach(function (p) {
+      if (p.dir === 'input' && p.name === 'a') {
+        nets.push({ id: 'n' + (seq++), name: '', pins: [{ part: 'a', pin: 'Y' }, { part: b.id, pin: 'a' }] });
+      }
+    });
+  });
+  return { v: 1, seq: 20, active: 'm1', modules: [{ id: 'm1', name: 'top', parts: parts, nets: nets }] };
+}
+
+(function externalStub() {
+  var doc = extDoc([{
+    id: 'u', ext: 'alu',
+    ports: [{ name: 'a', dir: 'input' }, { name: 'y', dir: 'output' }]
+  }]);
+  var v = Design.toVerilog(doc);
+  expect(v.indexOf('External module stub') >= 0, 'stub marker\n' + v);
+  expect(Design.externalStubs(v).indexOf('alu') >= 0, 'stub names ' + Design.externalStubs(v).join(','));
+  var out = imported(v);
+  if (!out) return;
+  expect(out.doc.modules.length === 1, 'externals stay out ' + out.doc.modules.length + '\n' + v);
+  var block = out.doc.modules[0].parts.filter(function (p) { return p.type === 'block'; })[0];
+  expect(block && !block.ref && block.ext === 'alu', 'still external ' + (block && block.ext));
+  var pname = (block.ports || []).map(function (p) { return p.name + ':' + p.dir; }).sort().join(',');
+  expect(pname === 'a:input,y:output', 'ports ' + pname);
+})();
+
+(function portUnion() {
+  var doc = extDoc([
+    { id: 'u1', ext: 'alu', ports: [{ name: 'a', dir: 'input' }, { name: 'y', dir: 'output' }] },
+    { id: 'u2', ext: 'alu', ports: [{ name: 'b', dir: 'input' }, { name: 'z', dir: 'output' }] }
+  ]);
+  var v = Design.toVerilog(doc);
+  var stub = v.slice(v.indexOf('External module stub'));
+  expect(stub.indexOf('input a') >= 0 && stub.indexOf('input b') >= 0, 'union inputs\n' + stub);
+  expect(stub.indexOf('output y') >= 0 && stub.indexOf('output z') >= 0, 'union outputs\n' + stub);
+})();
+
+(function constClock() {
+  var doc = {
+    v: 1, seq: 8, active: 'm1',
+    modules: [{
+      id: 'm1', name: 'tieff',
+      parts: [
+        { id: 'd', type: 'in', name: 'd', x: 0, y: 0 },
+        { id: 'z', type: 'c0', name: 'lo', x: 0, y: 80 },
+        { id: 'ff', type: 'dff', name: 'ff', x: 160, y: 20, clkEdge: 'pos', hasRst: false, rstEdge: 'pos', rstVal: 0 },
+        { id: 'q', type: 'out', name: 'q', x: 320, y: 20 }
+      ],
+      nets: [
+        { id: 'n1', name: '', pins: [{ part: 'd', pin: 'Y' }, { part: 'ff', pin: 'D' }] },
+        { id: 'n2', name: '', pins: [{ part: 'z', pin: 'Y' }, { part: 'ff', pin: 'CLK' }] },
+        { id: 'n3', name: '', pins: [{ part: 'ff', pin: 'Q' }, { part: 'q', pin: 'A' }] }
+      ]
+    }]
+  };
+  var v = Design.toVerilog(doc);
+  expect(/assign \w+ = 1'b0;/.test(v), 'const clk assign\n' + v);
+  var out = imported(v);
+  if (!out) return;
+  var mod = out.doc.modules[0];
+  var ff = mod.parts.filter(function (p) { return p.type === 'dff'; })[0];
+  var c0 = mod.parts.filter(function (p) { return p.type === 'c0'; })[0];
+  expect(ff && c0, 'c0 and dff came back');
+  if (!ff || !c0) return;
+  var joined = mod.nets.some(function (n) {
+    var hasC = n.pins.some(function (r) { return r.part === c0.id; });
+    var hasK = n.pins.some(function (r) { return r.part === ff.id && r.pin === 'CLK'; });
+    return hasC && hasK;
+  });
+  expect(joined, 'c0 still drives CLK\n' + v);
+})();
+
 if (typeof window !== 'undefined') {
   window.__testFailed = failed;
   var out = document.getElementById('out');
-  if (out) out.textContent = (failed ? failed + ' failed' : 'ok') + (messages.length ? '\n' + messages.join('\n') : '');
+  if (out) out.textContent = 'design: ' + (failed ? failed + ' failed' : 'ok') + (messages.length ? '\n' + messages.join('\n') : '');
 }
 if (typeof process !== 'undefined' && process.exit) {
   if (failed) {
