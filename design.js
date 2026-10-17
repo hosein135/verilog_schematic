@@ -12,12 +12,36 @@
 
   var MULTI = { and: 1, nand: 1, or: 1, nor: 1, xor: 1, xnor: 1 };
   var KEY = Object.create(null);
-  [
-    'module', 'endmodule', 'input', 'output', 'inout', 'wire', 'reg', 'assign',
-    'always', 'begin', 'end', 'if', 'else', 'posedge', 'negedge',
-    'and', 'nand', 'or', 'nor', 'xor', 'xnor', 'not', 'buf',
-    'bufif0', 'bufif1', 'notif0', 'notif1'
-  ].forEach(function (k) { KEY[k] = 1; });
+  /* IEEE 1364-2005 keywords, then the IEEE 1800-2012 ones: the simulator can
+     run iverilog -g2012, which reserves them too. */
+  (
+    'always and assign automatic begin buf bufif0 bufif1 case casex casez cell cmos config ' +
+    'deassign default defparam design disable edge else end endcase endconfig endfunction ' +
+    'endgenerate endmodule endprimitive endspecify endtable endtask event for force forever ' +
+    'fork function generate genvar highz0 highz1 if ifnone incdir include initial inout input ' +
+    'instance integer join large liblist library localparam macromodule medium module nand ' +
+    'negedge nmos nor noshowcancelled not notif0 notif1 or output parameter pmos posedge ' +
+    'primitive pull0 pull1 pulldown pullup pulsestyle_ondetect pulsestyle_onevent rcmos real ' +
+    'realtime reg release repeat rnmos rpmos rtran rtranif0 rtranif1 scalared showcancelled ' +
+    'signed small specify specparam strong0 strong1 supply0 supply1 table task time tran ' +
+    'tranif0 tranif1 tri tri0 tri1 triand trior trireg unsigned use uwire vectored wait wand ' +
+    'weak0 weak1 while wire wor xnor xor ' +
+    'accept_on alias always_comb always_ff always_latch assert assume before bind bins binsof ' +
+    'bit break byte chandle checker class clocking const constraint context continue cover ' +
+    'covergroup coverpoint cross dist do endchecker endclass endclocking endgroup endinterface ' +
+    'endpackage endprogram endproperty endsequence enum eventually expect export extends extern ' +
+    'final first_match foreach forkjoin global iff ignore_bins illegal_bins implements implies ' +
+    'import inside int interconnect interface intersect join_any join_none let local logic ' +
+    'longint matches modport nettype new nexttime null package packed priority program property ' +
+    'protected pure rand randc randcase randsequence ref reject_on restrict return s_always ' +
+    's_eventually s_nexttime s_until s_until_with sequence shortint shortreal soft solve static ' +
+    'string strong struct super sync_accept_on sync_reject_on tagged this throughout ' +
+    'timeprecision timeunit type typedef union unique unique0 until until_with untyped var ' +
+    'virtual void wait_order weak wildcard with within'
+  ).split(' ').forEach(function (k) { KEY[k] = 1; });
+  var INNER = { and: 'and', nand: 'and', or: 'or', nor: 'or', xor: 'xor', xnor: 'xor' };
+  var INVERTING = { nand: 1, nor: 1, xnor: 1 };
+  var STUB_NOTE = '// External module stub (no logic). Replace with the real module.';
 
   var EXAMPLES = [
     ['half', 'Half adder'],
@@ -54,7 +78,7 @@
     var s = String(raw == null ? '' : raw).trim();
     s = s.replace(/[^A-Za-z0-9_$]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '');
     if (!s) return '';
-    if (/^[0-9]/.test(s)) s = 'n_' + s;
+    if (/^[0-9$]/.test(s)) s = 'n_' + s;
     return s;
   }
 
@@ -442,7 +466,65 @@
     return { name: id, changed: id !== original };
   }
 
-  function fromCompiled(compiled) {
+  function inputCount(cell) {
+    var n = 0;
+    (cell.pins || []).forEach(function (p) { if (p.dir === 'in') n++; });
+    return n;
+  }
+
+  /* A drawn gate has at most 8 inputs. A wider one becomes a tree whose inner
+     gates use the non-inverting kind, so the root keeps the original logic. */
+  function gateTree(cell) {
+    var level = [];
+    var out = null;
+    (cell.pins || []).forEach(function (p) {
+      if (p.dir === 'in') level.push(p.net);
+      else if (p.dir === 'out' && !out) out = p.net;
+    });
+    var inner = [];
+    var depth = 0;
+    var k = 0;
+    function gate(id, kind, name, nets, outNet) {
+      var pins = nets.map(function (n, j) { return { name: inName(j, nets.length), dir: 'in', net: n }; });
+      pins.push({ name: 'Y', dir: 'out', net: outNet });
+      return { id: id, kind: kind, name: name, pins: pins };
+    }
+    while (level.length > 8) {
+      var groups = Math.ceil(level.length / 8);
+      var next = [];
+      var start = 0, g;
+      depth++;
+      for (g = 0; g < groups; g++) {
+        var size = Math.floor(level.length / groups) + (g < level.length % groups ? 1 : 0);
+        var net = { id: 'tree_' + cell.id + '_' + k, label: '', isConst: false };
+        k++;
+        var c = gate(cell.id + '_' + k, INNER[cell.kind], cell.name + '_' + k, level.slice(start, start + size), net);
+        c.level = depth;
+        c.row = g - (groups - 1) / 2;
+        inner.push(c);
+        next.push(net);
+        start += size;
+      }
+      level = next;
+    }
+    var root = gate(cell.id, cell.kind, cell.name, level, out);
+    root.x = cell.x;
+    root.y = cell.y;
+    inner.forEach(function (c) {
+      if (typeof cell.x !== 'number' || typeof cell.y !== 'number') return;
+      c.x = cell.x - 120 * (depth - c.level + 1);
+      c.y = Math.max(0, cell.y + c.row * 80);
+    });
+    return inner.concat([root]);
+  }
+
+  function emptyModule(mod) {
+    return (mod.cells || []).every(function (c) { return c.kind === 'port'; });
+  }
+
+  /* opts.externals: names of modules that are only stubs for external blocks
+     (Design.externalStubs of the source). Their instances stay external. */
+  function fromCompiled(compiled, opts) {
     var warnings = [];
     var doc = blank();
     doc.modules = [];
@@ -456,10 +538,13 @@
     var order = compiled.order && compiled.order.length ? compiled.order.slice() : Object.keys(compiled.modules || {});
     var pendingRef = [];
     var GATE = { and: 1, nand: 1, or: 1, nor: 1, xor: 1, xnor: 1, not: 1, buf: 1 };
+    var stubs = Object.create(null);
+    ((opts && opts.externals) || []).forEach(function (n) { stubs[n] = 1; });
 
     order.forEach(function (modName) {
       var src = compiled.modules[modName];
       if (!src) return;
+      if (stubs[modName] && modName !== compiled.top && emptyModule(src)) return;
       var modId = 'm' + (seq++);
       idByName[src.name || modName] = modId;
       var usedNames = Object.create(null);
@@ -474,7 +559,19 @@
       var parts = [];
       var cellPart = Object.create(null);
       var gi = 0;
+      var cells = [];
       (src.cells || []).forEach(function (cell) {
+        var nIn = inputCount(cell);
+        if (!MULTI[cell.kind] || nIn <= 8) {
+          cells.push(cell);
+          return;
+        }
+        var tree = gateTree(cell);
+        warnings.push(src.name + ': ' + cell.kind.toUpperCase() + ' ' + cell.name + ' has ' + nIn +
+          ' inputs and is drawn as ' + tree.length + ' gates (8 inputs at most)');
+        cells = cells.concat(tree);
+      });
+      cells.forEach(function (cell) {
         var x = typeof cell.x === 'number' ? cell.x : 40 + (gi % 6) * 150;
         var y = typeof cell.y === 'number' ? cell.y : 40 + Math.floor(gi / 6) * 110;
         var part = null;
@@ -487,14 +584,18 @@
             x: x, y: y
           };
         } else if (GATE[cell.kind]) {
-          var nIn = 0;
-          (cell.pins || []).forEach(function (p) { if (p.dir === 'in') nIn++; });
+          var nIn = inputCount(cell);
+          var type = cell.kind;
+          if (MULTI[type] && nIn === 1) {
+            type = INVERTING[type] ? 'not' : 'buf';
+            warnings.push(src.name + ': 1-input ' + cell.kind.toUpperCase() + ' ' + cell.name + ' imported as ' + type.toUpperCase());
+          }
           part = {
             id: 'p' + (seq++),
-            type: cell.kind,
-            name: uniq(cell.name, cell.kind),
+            type: type,
+            name: uniq(cell.name, type),
             x: x, y: y,
-            inputs: (cell.kind === 'not' || cell.kind === 'buf') ? 1 : Math.max(2, Math.min(8, nIn || 2))
+            inputs: MULTI[type] ? Math.max(2, Math.min(8, nIn || 2)) : 1
           };
         } else if (cell.kind === 'const') {
           part = {
@@ -551,7 +652,7 @@
       });
       var nets = [];
       var seen = Object.create(null);
-      (src.cells || []).forEach(function (cell) {
+      cells.forEach(function (cell) {
         var part = cellPart[cell.id];
         if (!part) return;
         (cell.pins || []).forEach(function (pin) {
@@ -565,7 +666,8 @@
           if (!pinsOf(part, doc).some(function (sp) { return sp.name === pname; })) return;
           var bucket = seen[pin.net.id];
           if (!bucket) {
-            bucket = { id: 'n' + (seq++), name: '', pins: [] };
+            var label = !pin.net.isConst && pin.net.label ? safeLabel(pin.net.label).name : '';
+            bucket = { id: 'n' + (seq++), name: label, pins: [] };
             seen[pin.net.id] = bucket;
             nets.push(bucket);
           }
@@ -573,6 +675,15 @@
             bucket.pins.push({ part: part.id, pin: pname });
           }
         });
+      });
+      var partById = Object.create(null);
+      parts.forEach(function (p) { partById[p.id] = p; });
+      nets.forEach(function (net) {
+        var onPort = net.pins.some(function (r) {
+          var t = partById[r.part].type;
+          return t === 'in' || t === 'out';
+        });
+        if (onPort) net.name = '';
       });
       doc.modules.push({ id: modId, name: src.name || modName, parts: parts, nets: nets });
     });
@@ -798,7 +909,6 @@
         return ka.y - kb.y || ka.x - kb.x || String(ka.id).localeCompare(String(kb.id));
       });
 
-      var deferred = [];
       infos.forEach(function (info) {
         if (info.kind === 'const') return;
         if (info.logic.length) {
@@ -860,9 +970,6 @@
         }
       });
 
-      deferred.forEach(function (info) {
-        /* filled below after we know which were deferred; placeholder */
-      });
       infos.forEach(function (info) {
         if (!info.defer) return;
         info.vname = take(info.net.name, 'n', info.net.name ? { what: 'Net', netId: info.net.id } : null);
@@ -956,6 +1063,23 @@
         return fallback;
       }
 
+      var ties = Object.create(null);
+      function constEdge(part, pinName, value) {
+        issues.push({
+          level: 'warn',
+          msg: part.name + ' ' + pinName + ' is tied to constant ' + (value === "1'b1" ? '1' : '0'),
+          moduleId: mod.id,
+          partId: part.id
+        });
+        if (!ties[value]) {
+          ties[value] = take('', value === "1'b1" ? 'tie1' : 'tie0');
+          declareWire(ties[value]);
+          assigns.push('  assign ' + ties[value] + ' = ' + value + ';');
+        }
+        return ties[value];
+      }
+      function isConst(e) { return e === "1'b0" || e === "1'b1"; }
+
       mod.parts.slice().sort(byPos).forEach(function (part) {
         var t = part.type;
         if (MULTI[t] || t === 'not' || t === 'buf') {
@@ -989,7 +1113,8 @@
           }
           var d = tie(part, 'D', "1'b0");
           var clk = exprOf(part, 'CLK');
-          if (!isIdent(clk)) {
+          if (isConst(clk)) clk = constEdge(part, 'CLK', clk);
+          else if (!isIdent(clk)) {
             clk = take('', 'open_clk');
             declareWire(clk);
           }
@@ -997,7 +1122,8 @@
           if (part.hasRst) {
             var rpin = part.rstVal ? 'SET' : 'RST';
             var rexpr = exprOf(part, rpin);
-            if (!isIdent(rexpr)) {
+            if (isConst(rexpr)) rexpr = constEdge(part, rpin, rexpr);
+            else if (!isIdent(rexpr)) {
               rexpr = take('', 'open_rst');
               declareWire(rexpr);
             }
@@ -1034,15 +1160,39 @@
           } else {
             modn = ident(part.ext) || 'block';
             if (KEY[modn]) modn = modn + '_n';
+            var ext = null;
             if (!defined[modn]) {
-              if (!externals[modn]) externals[modn] = { name: modn, ports: blockPorts(part, doc), moduleId: mod.id, partId: part.id };
+              if (!externals[modn]) {
+                externals[modn] = { name: modn, ports: [], seen: Object.create(null), moduleId: mod.id, partId: part.id };
+              }
+              ext = externals[modn];
             }
-            conns = blockPorts(part, doc).map(function (p) {
+            var bound = Object.create(null);
+            var dup = [];
+            conns = [];
+            blockPorts(part, doc).forEach(function (p) {
               var emitted = ident(p.name) || 'p';
               if (KEY[emitted]) emitted = emitted + '_n';
+              if (bound[emitted]) {
+                dup.push(emitted);
+                return;
+              }
+              bound[emitted] = 1;
+              if (ext && !ext.seen[emitted]) {
+                ext.seen[emitted] = 1;
+                ext.ports.push({ name: emitted, dir: p.dir });
+              }
               var ex = exprOf(part, String(p.name || 'p'));
-              return '.' + emitted + '(' + (ex || '') + ')';
+              conns.push('.' + emitted + '(' + (ex || '') + ')');
             });
+            if (dup.length) {
+              issues.push({
+                level: 'error',
+                msg: part.name + ' has more than one port named ' + dup.join(', ') + '; only one is connected',
+                moduleId: mod.id,
+                partId: part.id
+              });
+            }
           }
           var inst = lab.inst[part.id] || take(part.name, 'u', { what: 'Instance', partId: part.id });
           lab.inst[part.id] = inst;
@@ -1097,19 +1247,12 @@
 
     Object.keys(externals).forEach(function (name) {
       var ext = externals[name];
-      var seen = Object.create(null);
-      var ports = [];
-      ext.ports.forEach(function (p) {
-        var nm = ident(p.name) || 'p';
-        if (KEY[nm]) nm = nm + '_n';
-        var base = nm, i = 2;
-        while (seen[nm]) { nm = base + '_' + i; i++; }
-        seen[nm] = 1;
-        ports.push('  ' + (p.dir === 'output' ? 'output ' : 'input ') + nm);
+      var ports = ext.ports.map(function (p) {
+        return '  ' + (p.dir === 'output' ? 'output ' : 'input ') + p.name;
       });
-      var stub;
-      if (!ports.length) stub = 'module ' + ext.name + ';\nendmodule\n';
-      else stub = 'module ' + ext.name + ' (\n' + ports.join(',\n') + '\n);\nendmodule\n';
+      var stub = STUB_NOTE + '\n';
+      if (!ports.length) stub += 'module ' + ext.name + ';\nendmodule\n';
+      else stub += 'module ' + ext.name + ' (\n' + ports.join(',\n') + '\n);\nendmodule\n';
       chunks.push(stub);
       issues.push({
         level: 'warn',
@@ -1165,6 +1308,16 @@
     return report(doc).verilog;
   }
 
+  function externalStubs(src) {
+    var note = STUB_NOTE.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
+    var re = new RegExp(note + '[^\\n]*\\n\\s*module\\s+([A-Za-z_][A-Za-z0-9_$]*)', 'g');
+    var names = [];
+    var m;
+    var text = String(src == null ? '' : src);
+    while ((m = re.exec(text))) names.push(m[1]);
+    return names;
+  }
+
   return {
     MULTI: MULTI,
     EXAMPLES: EXAMPLES,
@@ -1181,7 +1334,9 @@
     blank: blank,
     example: example,
     fromCompiled: fromCompiled,
+    externalStubs: externalStubs,
     report: report,
-    toVerilog: toVerilog
+    toVerilog: toVerilog,
+    ident: ident
   };
 });

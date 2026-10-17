@@ -1,0 +1,1115 @@
+CIRCUITIKZ EXPORT / IMPORT, PDF DOWNLOAD, AND VERILOG ROUND-TRIP
+================================================================
+Implementation spec for the "verilog_schematic" project.
+
+Status  : ROADMAP ONLY. Do not write product code until the owner says to.
+Version : 2 (2026-10-17). Rewritten after inspecting this repo, the live
+          CircuiTikZ-Designer, CircuiTikZ, and the deleted first attempt.
+Audience: people and LLM coding agents. This file is self-contained.
+
+If you are an LLM picking this up: read sections 0-2, then 12, then the
+section you are implementing. Do not invent analog parts, a local server,
+or a bundler. Match the existing ES5 / UMD style.
+
+
+----------------------------------------------------------------------
+0. HOW TO USE THIS FILE
+----------------------------------------------------------------------
+  0  How to use this file
+  1  Project context (what already exists)
+  2  Goals, non-goals, current git state
+  3  Equivalent elements (our palette <-> CircuiTikZ <-> Designer)
+  4  CircuiTikZ geometry tables (re-verify before baking into code)
+  5  Export spec: drawing -> CircuiTikZ TeX
+  6  Import spec: CircuiTikZ TeX -> drawing
+  7  PDF spec: "Download PDF"
+  8  UI spec
+  9  Verilog converter audit (drawing <-> Verilog)
+ 10  Test plan
+ 11  Acceptance criteria
+ 12  Ordered task list (do this, in this order)
+ 13  Risks, assumptions, out of scope
+  A  How to re-measure anchors
+  B  CircuiTikZ-Designer export format (from source, 2026-10-17)
+  C  Why the previous CircuiTikZ attempt was deleted (do not repeat)
+  D  Reference links
+
+
+----------------------------------------------------------------------
+1. PROJECT CONTEXT
+----------------------------------------------------------------------
+1.1 What this repo is
+  A browser-only Verilog schematic tool. Nothing runs on a server.
+  Open designer.html from disk (file://). That constraint must stay true.
+
+  designer.html + designer.js
+      Schematic canvas editor. User places gates / mux / dff / ports /
+      constants / module blocks, wires pins, and gets structural Verilog
+      in a side panel. Header buttons today: Import, Save, Export .v,
+      Simulate, Preview.
+  design.js (UMD, global Design)
+      Drawing data model. Verilog export: Design.report(doc) /
+      Design.toVerilog(doc). Verilog import: Design.fromCompiled(compiled).
+  schematic.js (UMD, global Schematic)
+      Verilog parser/elaborator (Schematic.compile), auto layout
+      (Schematic.layout), SVG viewer (Schematic.draw). Also baked into
+      verilog.html. Do not change this file for this work.
+  shell.html + build_standalone.py -> verilog.html
+      Icarus Verilog WASM simulator. Do not touch.
+  test.html + test_design.js
+      Tests. Open test.html in a browser, or: node test_design.js
+
+1.2 Coding conventions (match them exactly)
+  - Plain ES5: var, function, no arrow functions, no classes, no modules,
+    no bundler, no npm dependencies. 'use strict'.
+  - 2-space indent, single quotes, semicolons.
+  - Shared modules use the UMD wrapper already in design.js:
+      (function (root, factory) {
+        var api = factory();
+        if (typeof module !== 'undefined' && module.exports) module.exports = api;
+        if (root) root.CircuiTikZ = api;
+      })(typeof window !== 'undefined' ? window : globalThis, function () { ... });
+  - Comments only where the code cannot say it.
+
+1.3 Drawing document (state.doc, saved as JSON)
+  doc = {
+    v: 1, seq: <id counter>, active: <module id>,
+    modules: [{
+      id, name,
+      parts: [{ id, type, name, x, y, ...type fields }],
+      nets:  [{ id, name, pins: [{ part: <part id>, pin: <pin name> }] }]
+    }]
+  }
+
+  Palette in designer.js PALETTE:
+    Ports : in, out
+    Gates : and, nand, or, nor, xor, xnor, not, buf
+    Cells : mux, dff, c0, c1, block
+
+  Pins (Design.pins(part, doc); side l/r/b = left/right/bottom):
+    in            : Y  (out, r)
+    out           : A  (in,  l)
+    c0, c1        : Y  (out, r)
+    not, buf      : A (in, l), Y (out, r)
+    and nand or nor xor xnor
+                  : A..H (in, l; inputs = 2..8), Y (out, r)
+    mux           : D0, D1 (in, l), Y (out, r), S (in, b)
+    dff           : D (in, l), RST or SET (in, l; only if hasRst;
+                    SET when rstVal = 1), Q (out, r), CLK (in, b)
+                    fields: clkEdge 'pos'|'neg', hasRst, rstEdge 'pos'|'neg'
+                    (neg = active low), rstVal 0|1
+    block         : module instance. ref = module id (internal) or
+                    ref = '' + ext = name + ports [{name, dir}] (external).
+                    Pins: inputs on the left, outputs on the right.
+
+  Canvas: pixels, y grows downward, grid snap 8 px.
+  Design.metrics(part, doc) -> { w, h, pins: [{ name, dir, side, x, y }] }
+  pin x/y relative to the part's top-left (part.x, part.y).
+
+  Wire routing already exists as designer.js route(points). Export should
+  reuse the same idea in TeX centimetres (y up). Do not draw diagonal
+  \draw (a) -- (b) lines.
+
+1.4 Verilog flow today
+  Export : Design.report(doc) -> { verilog, issues, labels }.
+           labels[moduleId] = { vname, ports{partId: name},
+           nets{netId: info with .vname}, inst{partId: name} }.
+  Import : designer.js importVerilog(src):
+             c = Schematic.compile(src);
+             Schematic.layout(each module);
+             out = Design.fromCompiled(c);   // DOES NOT pass externals yet
+             state.doc = out.doc;
+  Compiled module: { cells: [{ id, kind, name, typeName, pins, x, y }],
+                     nets: [{ id, label, also, isConst }] }.
+  kind: port | const | and nand or nor xor xnor not buf | mux | dff |
+        mod | op | proc.
+
+1.5 Existing UI pieces the new dialog must reuse
+  - Modal #modal / #sheet / #sheetBar / #sheetTitle / #sheetBody /
+    #sheetMod / #importBar / #importGo. Preview and Import already share
+    this modal.
+  - download(name, data, type) in designer.js already accepts a Blob.
+  - CSS classes: button.primary, button.ghost, button.mini, .importbar,
+    .sheetbar, textarea in #sheetBody.
+  - Store key for the drawing: 'verilog-schematic-designer-v1'.
+    Use a separate key for TeX style: 'verilog-schematic-designer-tex'.
+
+
+----------------------------------------------------------------------
+2. GOALS, NON-GOALS, CURRENT GIT STATE
+----------------------------------------------------------------------
+G1  Map every schematic element to CircuiTikZ (section 3), using the
+    same shape names CircuiTikZ-Designer emits when it has them.
+G2  A "CircuiTikZ" button in the designer header. Opens a dialog with
+    the CircuiTikZ TeX of the drawing. The text is editable.
+G3  The user can write or paste CircuiTikZ (our export, a Designer
+    export, or hand-written) and convert it into a drawing
+    ("Convert to schematic"). .tex/.tikz/.pgf files also open via
+    Import / file open.
+G4  A "Download PDF" button that compiles the TeX in the dialog and
+    downloads the PDF, without a local server.
+G5  Finish the schematic <-> Verilog round-trip (section 9) and lock it
+    with tests.
+
+Non-goals
+  - Analog parts (resistors, sources, transistors). Importer skips them
+    with a warning. Do not add them to our palette.
+  - Live PDF preview while typing.
+  - Changes to schematic.js or verilog.html.
+  - A local Python/tectonic server (explicitly removed; see appendix C).
+  - Rotating parts on our canvas. We only place axis-aligned parts.
+    The importer may still READ rotate/xscale/yscale from TeX.
+
+Current git state (2026-10-17, inspect before coding):
+  HEAD history that matters:
+    9b87f6c  Add CircuiTikZ support (circuitikz.js, serve.py, UI)
+    098c09f  .tex download + PDF error handling + run.sh
+    daaaa3d  DELETED circuitikz.js, serve.py, run.sh
+  Working tree:
+    design.js is MODIFIED vs HEAD: Verilog fixes F1-F7 from section 9
+    are already in the file (keywords, gate trees, stub marker,
+    constant clocks, net names on import, fromCompiled(opts.externals)).
+    designer.js is NOT wired: importVerilog still calls
+    Design.fromCompiled(c) with no externals.
+    test_design.js has NO tests for F1-F6.
+    circuitikz.js DOES NOT EXIST. No CircuiTikZ button in designer.html.
+  First job of the implementing agent: `git diff design.js` and keep
+  those Verilog fixes; do not revert them. Finish the remaining Verilog
+  wiring (designer.js + tests) as Step 2.
+
+
+----------------------------------------------------------------------
+3. EQUIVALENT ELEMENTS
+----------------------------------------------------------------------
+Inspected live CircuiTikZ-Designer v0.8.2 at
+https://www.circuit2tikz.tf.fau.de/designer/ on 2026-10-17.
+Symbol drawer categories: Basic, Grounds and supply voltages, Wiring,
+Block diagram, Transistors, Tubes, RF, Inductors, Miscellaneous,
+Amplifiers, Switches, Logic gates, Flipflops, Resistive, Capacitive,
+Diodes, Sources, Instruments, Mechanical.
+Style buttons: American / European (IEEE is a CircuiTikZ style, not a
+Designer top-level button).
+Keyboard shortcuts from Designer's help: G ground, Alt+G tailless
+ground, R resistor, (Alt+)L inductor, (Alt+)C capacitor, D diode,
+(Alt+)B BJT, (Alt+)N MOS, (Alt+)X crossing, (Alt+). terminal, T text,
+W wire.
+
+Designer has NO mux and NO N-input gates (open issues #23 and #44).
+We still emit CircuiTikZ `muxdemux` and `number inputs=N` because those
+are real CircuiTikZ shapes; the importer must accept them even though
+Designer cannot draw them.
+
+Our part        | CircuiTikZ we EMIT                        | Pin -> anchor                      | CircuiTikZ-Designer element
+----------------+-------------------------------------------+------------------------------------+------------------------------------------
+ in  (input)    | \node[ocirc, label={left:NAME}]           | Y -> the node itself               | "Unconnected terminal" [ocirc] + label
+                |                                           |                                    | (shortcut Alt+.)
+ out (output)   | \node[ocirc, label={right:NAME}]          | A -> the node itself               | same [ocirc], label on the right
+ and            | <style> and port  (+ number inputs=N)     | A..H -> in 1..in N, Y -> out       | "AND gate (american|european|IEEE)"
+ nand           | <style> nand port (+ number inputs=N)     | same                               | "NAND gate (...)"
+ or / nor       | <style> or port / nor port                | same                               | "OR gate (...)" / "NOR gate (...)"
+ xor / xnor     | <style> xor port / xnor port              | same                               | "XOR gate (...)" / "XNOR gate (...)"
+ not            | <style> not port                          | A -> in, Y -> out                  | "NOT gate (...)"
+ buf            | <style> buffer port                       | A -> in, Y -> out                  | "Buffer port (...)"
+ mux (2:1)      | muxdemux, muxdemux def={NL=2, NR=1, NB=1, | D0 -> lpin 1, D1 -> lpin 2,        | none (Designer has no mux)
+                |   NT=0, w=1.5, Lh=2.5, Rh=1.5},           | S -> bpin 1, Y -> rpin 1           |
+                |   muxdemux label={L1=0, L2=1}             |                                    |
+ dff            | flipflop D (+ flipflop def={...})         | D -> pin 1, CLK -> pin 3,          | Flipflops category:
+                |                                           | Q -> pin 6, RST -> down, SET -> up | "Edge-triggered synchronous flip-flop D"
+                |                                           | (pin 4 = Q-bar, import only)       | [flipflop D]; options "Add async SR",
+                |                                           |                                    | "Dot on not Q"
+ c0             | ground                                    | Y -> the node itself               | "Ground" [ground] (G)
+ c1             | vcc                                       | Y -> the node itself               | "VCC/VDD" [vcc]
+ block          | muxdemux as a rectangle (Lh = Rh), pin    | k-th input -> lpin k,              | none as a generic instance.
+                |   labels via muxdemux label, text =       | k-th output -> rpin k              | Designer "Block diagram" has
+                |   instance \\ module                      |                                    | rectangles only, not HDL blocks.
+ wire / net     | \draw path: (pin) -- ++(dx,0) |- (pin)    | -                                  | Wire tool (W): --, -|, |-
+ net junction   | \node[circ] at (x,y) {};                  | -                                  | "Connected terminal" [circ] (.)
+
+<style> is one of american | european | ieeestd, chosen in the dialog
+(default american, CircuiTikZ's own default). Export always writes the
+FULL shape name ("american and port"), so the output does not depend on
+global \ctikzset.
+
+Flip-flop options emitted (CircuiTikZ keys; `flipflop D` already means
+t1=D, t6=Q, c3=1, t4=\ctikztextnot{Q}):
+  clkEdge 'neg'                  -> flipflop def={n3=1}
+  hasRst, rstVal 0, active high  -> flipflop def={td=RST}
+  hasRst, rstVal 0, active low   -> flipflop def={td=RST, nd=1}
+  hasRst, rstVal 1, active high  -> flipflop def={tu=SET}
+  hasRst, rstVal 1, active low   -> flipflop def={tu=SET, nu=1}
+  All keys go in one flipflop def={...}.
+  Do NOT put RST/SET on pin 2 (that is a data pin). Async SR is up/down.
+  The deleted first attempt used pin 2. Do not copy that.
+
+Import also accepts (section 6): unprefixed "and port" (style from
+global settings), any ground/supply shape, other poles (circ,
+diamondpole, squarepole and open variants), `to[short, o-]` poles,
+text labels at dangling wire ends, schmitt ports (as buffer/not), and
+other flip-flop types and latches (as external blocks).
+
+
+----------------------------------------------------------------------
+4. CIRCUITIKZ GEOMETRY (CircuiTikZ 1.8.x)
+----------------------------------------------------------------------
+These numbers come from \pgfpointanchor. RE-VERIFY them in Step 3 by
+compiling the probe in appendix A against latex.ytotech.com (or
+TeXLive.net returning the log) before baking them into circuitikz.js.
+If a measured value differs, use the measured one.
+
+All values are centimetres in the node's own frame: origin = the node
+position given in `at (x,y)`, x right, y UP.
+
+1 cm = 28.4528 pt.
+Drawing scale: 1 px = 2.54/96 cm = 0.0264583 cm (96 dpi, same as
+CircuiTikZ-Designer), so 1 cm = 37.795 px.
+TeX y = -(canvas y).
+
+4.1 Logic gates and/nand/or/nor/xor/xnor with N inputs (default 2)
+  Input k (1-based) of N: y_k = h * (1 - (2k - 1) / N).
+  Body height does not change with N. All six kinds of one style share
+  the same geometry.
+  style     in k x    out x    h       bbox x            bbox y
+  american  -1.3860   0.1540   0.560   [-1.3860, 0.1540] [-0.560, 0.560]
+  european  -1.7640   0.1960   0.455   [-1.7640, 0.1960] [-0.455, 0.455]
+  ieeestd   -1.0812   1.0812   0.560   [-1.0812, 1.0812] [-0.560, 0.560]
+  Example american N=3: in 1 (-1.386, 0.3733), in 2 (-1.386, 0),
+  in 3 (-1.386, -0.3733), out (0.154, 0).
+  `text` anchor (body centre): american (-0.616, 0), european (-0.784, 0),
+  ieeestd (0, 0). `center` is (0, 0) for every shape.
+  IEEE border anchors (import only): `bin k` has the same y as `in k`,
+  x = -0.6892 (and/nand), -0.7227 (or/nor), -0.8302 (xor/xnor);
+  `bout` = (0.6892, 0) for and/or/xor, (0.8617, 0) for nand/nor/xnor.
+
+4.2 not port / buffer port (`in` and `in 1` are the same)
+  style     in x      out x    bbox y
+  american  -0.7000   0.7000   [-0.700, 0.700]
+  european  -1.7640   0.1960   [-0.455, 0.455]
+  ieeestd   -0.8769   0.8769   [-0.560, 0.560]
+  IEEE `bin` = (-0.4850, 0); `bout` = (0.6575, 0) for not, (0.4850, 0)
+  for buffer.
+
+4.3 \ctikzset{logic ports origin=center}
+  Shifts american gates by +0.6160 in x and every european port
+  (gates, not, buffer) by +0.7840 in x (body centred on the origin).
+  american not/buffer and all ieeestd ports do not move.
+  Must be set with \ctikzset; as a node option it is a fatal TeX error.
+
+4.4 Flip-flops (flipflop, flipflop D/T/JK/SR, latch: same geometry)
+  pin 1 (-1.12,  0.84)   pin 6 ( 1.12,  0.84)
+  pin 2 (-1.12,  0.00)   pin 5 ( 1.12,  0.00)
+  pin 3 (-1.12, -0.84)   pin 4 ( 1.12, -0.84)
+  up    ( 0.00,  1.54)   down  ( 0.00, -1.54)
+  Body x [-0.84, 0.84], y [-1.26, 1.26]. up/down always exist, even
+  without `add async SR` (that option only adds SET/RST labels).
+
+4.5 muxdemux (keys: NL, NR, NB, NT, w, Lh, Rh; defaults NL=8, NR=1,
+    NB=3, NT=0, w=3, Lh=8, Rh=6). Unit u = 0.56 cm, pin lead L = 0.28 cm.
+  lpin k : x = -(w*u/2 + L),  y = Lh*u/2 - (k - 0.5) * Lh*u/NL
+  rpin k : x = +(w*u/2 + L),  y = Rh*u/2 - (k - 0.5) * Rh*u/NR
+  bpin k : xk = -w*u/2 + (k - 0.5) * w*u/NB
+           t  = (xk + w*u/2) / (w*u)
+           hb = (Lh/2 + (Rh/2 - Lh/2) * t) * u
+           y  = -(hb + L)
+  tpin k : same x, y = +(hb + L)
+  blpin/brpin/bbpin/btpin = same points without the lead.
+  Check: mux def above -> lpin 1 (-0.70, 0.35), lpin 2 (-0.70, -0.35),
+  rpin 1 (0.70, 0), bpin 1 (0, -0.84).
+  block def NL=3, NR=2, w=2, Lh=Rh=3 -> lpin 1..3 x=-0.84 y=0.56/0/-0.56,
+  rpin 1/2 x=0.84 y=0.42/-0.42.
+
+4.6 Poles and supplies
+  ocirc, circ, diamondpole, odiamondpole, squarepole, osquarepole:
+  connection point = node position (circ/ocirc radius 0.056 cm).
+  vcc, vee, ground, tlground, rground, sground, tground, nground,
+  pground, cground, eground, eground2: connection point = node position.
+  vcc is drawn above it (north 0.42), ground below it (south -0.56).
+
+4.7 Node transforms
+  rotate=<deg>, xscale, yscale, scale apply in option order (PGF: a
+  later option is applied to the point first).
+  anchor=<a> moves the node so anchor <a> sits at the `at` position.
+
+
+----------------------------------------------------------------------
+5. EXPORT SPEC: DRAWING -> CIRCUITIKZ TEX
+----------------------------------------------------------------------
+5.1 API (new file circuitikz.js, UMD global CircuiTikZ, depends on Design)
+  CircuiTikZ.STYLES               [['american','American'], ['european',
+                                   'European'], ['ieeestd','IEEE']]
+  CircuiTikZ.toTex(doc, opts)     -> { tex, warnings }
+     opts.style  'american' (default) | 'european' | 'ieeestd'
+     opts.scope  'active' (default, the open module) | 'all'
+  CircuiTikZ.fromTex(text)        -> { doc, warnings } or { doc:null, error }
+  CircuiTikZ.looksLikeTex(text)   -> boolean
+  CircuiTikZ.wrapDocument(text)   -> full compilable document
+  CircuiTikZ.anchor(shape, name, opts)  (for tests)
+  Pure functions: no DOM, no network, run in Node.
+
+5.2 Document layout (always a complete, compilable document)
+  % Generated by Schematic Designer. Compile with pdflatex.
+  % "Convert to schematic" reads this back: nodes, wires, labels and the
+  % "% module:" / "% net:" comments.
+  \documentclass[border=10pt]{standalone}
+      (scope all and more than one module: add multi=circuitikz so each
+       module is a page)
+  \usepackage{circuitikz}
+  \begin{document}
+  % module: <module name>
+  \begin{circuitikz}
+    <port nodes>
+    <part nodes>
+    % net: <net name>
+    \draw ... ;
+    \node[circ] at (x, y) {};
+  \end{circuitikz}
+  \end{document}
+  Empty module: emit `\node {empty};` so the page compiles.
+
+5.3 Placement
+  - X = (px - minX) * S, Y = -(py - minY) * S, S = 2.54/96,
+    minX/minY = smallest part.x / part.y in the module.
+    Node positions rounded to 0.01 cm; anchors = rounded node + exact
+    offsets from section 4.
+  - Gates, not/buf, mux, dff, block: CircuiTikZ bbox centre on the centre
+    of our part box. Node position = part centre - bbox centre offset
+    (american gate: +0.616 in x of the body; european: +0.784; others 0).
+  - in port: ocirc at our Y pin (right edge middle).
+    out port: ocirc at our A pin (left edge middle).
+  - c0 / c1: ground / vcc at our Y pin.
+
+5.4 Node names
+  Prefer Verilog name from Design.report labels (ports -> ports[id],
+  gates and blocks -> inst[id]), else part.name, else the part type.
+  Sanitize to [A-Za-z0-9_] (others become '_'; leading digit gets 'n'
+  prefix), then unique inside the picture (name_2, name_3...).
+
+5.5 Node code per part
+  in    \node[ocirc, label={left:LABEL}] (name) at (x, y) {};
+  out   \node[ocirc, label={right:LABEL}] (name) at (x, y) {};
+  gate  \node[STYLE KIND port] (name) at (x, y) {};
+        N > 2 adds `, number inputs=N`. KIND = and|nand|or|nor|xor|xnor.
+  not   \node[STYLE not port] ...;   buf  \node[STYLE buffer port] ...;
+  mux   \node[muxdemux, muxdemux def={NL=2, NR=1, NB=1, NT=0, w=1.5,
+          Lh=2.5, Rh=1.5}, muxdemux label={L1=0, L2=1}] (name) at (x, y) {};
+  dff   \node[flipflop D] (name) ...; with options of section 3 as
+        \node[flipflop D, flipflop def={td=RST, nd=1}] (name) ...;
+  c0    \node[ground] (name) at (x, y) {};
+  c1    \node[vcc] (name) at (x, y) {};
+  block \node[muxdemux, muxdemux def={NL=I, NR=O, NB=0, NT=0, w=W, Lh=H,
+          Rh=H}, muxdemux label={L1=in1, ..., R1=out1, ...}] (name)
+          at (x, y) {\shortstack{INSTANCE\\ \footnotesize MODULE}};
+        I = inputs, O = outputs, H = max(I, O, 2), W = max(2.5,
+        0.16 * longest label + 1.2, rounded to 0.5). Inout counts as input.
+  Escape LABEL / text: \ -> \textbackslash{}, _ -> \_, $ -> \$,
+  & -> \&, % -> \%, # -> \#, { -> \{, } -> \}, ~ and ^ ->
+  \textasciitilde{} / \textasciicircum{}.
+
+5.6 Wires
+  Pin reference strings:
+    gate name.in k / name.out
+    not/buf name.in / name.out
+    mux name.lpin 1|2, name.bpin 1, name.rpin 1
+    dff name.pin 1|3|6, name.down, name.up
+    block name.lpin k / name.rpin k
+    ports and supplies: name
+  Pin side (stub direction): left inputs = l; outputs = r; bpin and
+  down = b; up = t; in/c0/c1 = r; out port = l.
+  Router (same idea as designer.js route(), TeX space, y up):
+  - source = output pin with the largest x (else first pin);
+    stub = 0.42 cm; s0 = source moved one stub along its side.
+  - load is "back" if it is an input whose tip x < s0.x - 0.21 cm.
+  - trunk x T = s0.x; if the nearest forward tip is more than 0.32 cm
+    right of s0, T = middle between s0.x and that tip.
+    dx = T - source.x, rounded to 0.01 cm.
+  - one \draw per load:
+      left/right load : \draw (SRC) -- ++(dx,0) |- (LOAD);
+      bottom load     : \draw (SRC) -- ++(dx,0) |- ([yshift=-0.42cm]LOAD) -- (LOAD);
+      top load        : same with yshift=0.42cm
+      back load       : \draw (SRC) -- ++(dx,0) |- (xL, yB) |- (LOAD);
+                        xL = load x - 0.42, yB = lowest pin y of the net
+                        - 0.74 - 0.37 * (index of this back load)
+    `|-` (vertical then horizontal) ends on the anchor, so wires stay
+    orthogonal even if a table value is slightly off.
+  - nets with fewer than 2 existing pins are skipped.
+  Do NOT emit a straight `--` between two pins that are not collinear.
+
+5.7 Junction dots
+  Rebuild each net's segments in absolute coordinates. At every segment
+  end point, collect the directions (left/right/up/down) in which some
+  segment of the same net leaves that point. Three or more directions ->
+  \node[circ] at (x, y) {};
+  No dot at a pin. Duplicate overlapping segments from several \draw
+  lines merge naturally.
+
+5.8 Hint comments (LaTeX ignores them; our importer reads them)
+  "% module: NAME" before each circuitikz environment.
+  "% net: NAME"    before the \draw lines of each net (Verilog net name
+                   from report labels).
+
+5.9 Numbers
+  Up to 4 decimals, trailing zeros removed, "-0" written as "0".
+
+5.10 Illustrative result (numbers are examples only)
+  % module: half_adder
+  \begin{circuitikz}
+    \node[ocirc, label={left:a}] (a) at (0, -0.44) {};
+    \node[ocirc, label={left:b}] (b) at (0, -3.09) {};
+    \node[american xor port] (sum) at (6.1, -0.63) {};
+    \node[american and port] (carry) at (6.1, -3.49) {};
+    \node[ocirc, label={right:s}] (s) at (10.9, -0.63) {};
+    \node[ocirc, label={right:c}] (c) at (10.9, -3.49) {};
+    % net: a
+    \draw (a) -- ++(2.3,0) |- (sum.in 1);
+    \draw (a) -- ++(2.3,0) |- (carry.in 1);
+    \node[circ] at (2.3, -0.44) {};
+    ...
+  \end{circuitikz}
+
+
+----------------------------------------------------------------------
+6. IMPORT SPEC: CIRCUITIKZ TEX -> DRAWING
+----------------------------------------------------------------------
+6.1 API
+  CircuiTikZ.fromTex(text) -> { doc, warnings }  or  { doc: null, error }
+  CircuiTikZ.looksLikeTex(text) -> boolean
+      true if the text has \begin{circuitikz}, \begin{tikzpicture},
+      \node[, \draw, or \usepackage{circuitikz} / \ctikzset.
+  Pure function, no DOM.
+
+6.2 Reading the text
+  - '%' starts a comment (not after a backslash). Keep "% module: X" and
+    "% net: X"; drop other comments.
+  - Find every \begin{circuitikz}[opts] ... \end{circuitikz} and
+    \begin{tikzpicture}[opts] ... \end{tikzpicture}. Each becomes a
+    module. Name: nearest preceding "% module:" hint, else "top"
+    (then "top_2", ...). If there is no environment, the whole text is
+    one picture body (pasting only \draw/\node lines works).
+  - Split a body into statements at ';' outside (), [], {}.
+
+6.3 Global style (what unprefixed "and port" means)
+  Default american. Changed by:
+    \usepackage[european|europeanports|american|americanports|cute]{circuitikz}
+    picture/scope options european, american, cute, european ports,
+    american ports, ieee ports
+    \ctikzset{logic ports=european|american|ieee}
+  Track \ctikzset{logic ports origin=center} the same way (section 4.3).
+  Picture option `transform shape` and picture-level scale/xscale/
+  yscale/shift apply to coordinates (and to node offsets only when
+  transform shape is set). CircuiTikZ-Designer always emits
+  \begin{tikzpicture}[transform shape, ...].
+
+6.4 Statements we handle
+  \draw, \path, \fill, \filldraw, \node (= \path node ...), \coordinate,
+  \ctikzset{...}, \tikzset{...} (style keys of 6.3 only),
+  \begin{scope}[...] / \end{scope} (shift={(x,y)}, xshift, yshift, scale,
+  xscale, yscale, rotate, transform shape).
+  Anything else (\foreach, \newcommand, \pic, \matrix, calc $...$) is
+  skipped with one warning per kind.
+
+6.5 Path syntax
+  Coordinates: (x,y) with optional units cm|mm|pt|in|bp (plain = cm),
+  simple arithmetic, polar (angle:radius), (name), (name.anchor),
+  ([xshift=..,yshift=..,shift={(..)}]name.anchor), (p |- q), (p -| q),
+  ++(dx,dy) (moves current point), +(dx,dy) (does not).
+  After a node reference the current point is the node CENTRE (TikZ
+  rule), so (a) -- ++(0.6,0) starts from a's centre.
+  Operations: -- , -| , |- , to (straight), to[...] , cycle, node,
+  coordinate, `at`. A coordinate with no operator before it starts a
+  new sub-path.
+  circle, rectangle, arc, grid, ellipse, .. controls .. are not wires
+  (skipped quietly).
+  to[...] options: `short` or no component = wire. Poles in the option
+  list (o- -o o-o *- -* *-* o-* *-o, also d/s variants) put an open pole
+  (port candidate) or a dot at that end. Any other component (R, C,
+  battery...) is skipped with a warning; it does not connect its ends.
+  \path segments are not wires unless the path has the `draw` option;
+  nodes inside \path still count.
+
+6.6 Node recognition (first matching option; `shape=` also accepted)
+  "<style> <kind> port" kind in and nand or nor xor xnor not buffer
+                         -> gate / not / buf
+  "<kind> port"          -> same with the global style
+  number inputs=N        -> gate inputs (2..8 directly; more: reuse
+                            Design.gateTree / fromCompiled splitting)
+  schmitt / ieeestd schmitt port        -> buf  (warning)
+  invschmitt / ieeestd invschmitt port  -> not  (warning)
+  flipflop D, flipflop (with flipflop def t1=D), add async SR,
+  dot on notQ            -> dff (6.10)
+  flipflop T|JK|SR, latch, other flipflop defs -> external block (6.11)
+  muxdemux               -> mux or block (6.11)
+  ocirc, odiamondpole, osquarepole, diamondpole, squarepole
+                         -> port candidate
+  circ                   -> junction; a circ touching exactly one wire
+                            end and having a label is a port candidate
+  vcc                    -> c1;  vee and every ground shape -> c0
+  plain text node (no shape)  -> label (6.9)
+  Other CircuiTikZ shapes -> skipped with a warning naming the shape.
+  Node options read: rotate, xscale, yscale, scale, anchor,
+  number inputs, flipflop def={...}, muxdemux def={...},
+  muxdemux label={...}, label=[..]{pos:text} or label={pos:text}, name=.
+  Node name: (name) anywhere in the node spec, or name=.
+  Designer auto names N1, N2... are "no name" for part naming.
+
+6.7 Geometry
+  pin world position = node position + M * (offset - anchorShift),
+  M = node transform (rotate/scale in option order),
+  anchorShift = offset of the anchor= option, then the scope transform
+  stack. Offsets from section 4.
+
+6.8 Connectivity (union-find)
+  Elements: every pin of every recognized node, every wire sub-path
+  (polyline), every dot, every pole.
+  - A polyline vertex written as a node reference binds to that pin
+    exactly ((g.in 2) -> pin of g; (a) or (a.center) on a port/supply
+    -> its only pin).
+  - A polyline end point within TOL = 0.05 cm of a pin joins that pin
+    (0.12 cm for poles, to allow wires that stop at the circle border).
+  - End point on end point of another polyline (TOL) -> join.
+  - End point on the inside of another polyline's segment (TOL) -> join
+    (T junction).
+  - A circ dot joins every polyline passing through it, including plain
+    crossings. Crossings without a dot do not connect.
+  - Each union set with at least 2 pins becomes a net.
+
+6.9 Labels
+  A label belongs to a node when it is given by label=..., or by a text
+  node whose position references that node ((N1.text),
+  ([xshift=..]N1), (N1.north) ...; this is how CircuiTikZ-Designer
+  writes labels), or by an inline text node on a path vertex that is a
+  dangling wire end.
+  Clean label text: $..$, \mathrm{} \text{} \texttt{} \textit{}
+  \mathit{} \textbf{} \strut, font switches and braces removed,
+  \_ -> _, x_{in} -> x_in, \overline{x} / \bar{x} / \ctikztextnot{x}
+  -> x_n, spaces -> _, then Design's identifier rules.
+
+6.10 Flip-flops
+  pin 1 -> D, pin 3 -> CLK, pin 6 -> Q.
+  Clock edge: falling if n3=1 (bubble), else rising.
+  down connected -> hasRst, rstVal 0 (RST). up connected -> rstVal 1
+  (SET). Active low if nd=1 / nu=1, or if the td / tu label is negated
+  (\ctikztextnot, \overline, \bar). Both connected: keep the reset, drop
+  the set, warn.
+  pin 4 (Q-bar) connected: add a NOT part fed by Q that drives the Q-bar
+  net (warning that it was added).
+
+6.11 muxdemux and other multipoles
+  muxdemux with NL=2, NR=1 and (NB=1 or NT=1) -> mux: lpin 1 = D0,
+  lpin 2 = D1, bpin 1 / tpin 1 = S, rpin 1 = Y. If the labels say
+  L1=1, L2=0, swap D0/D1.
+  Any other muxdemux -> block: lpins and b/t pins are inputs, rpins are
+  outputs. Port names from muxdemux label (L1=.., R1=.., B1=..), else
+  in1.., out1... Node text "\shortstack{INST\\ MODULE}" (after cleaning)
+  gives instance name (first line, or node name) and module name (last
+  line).
+  flipflop T/JK/SR and latch -> external block named flipflop_T,
+  flipflop_JK, flipflop_SR or latch; ports = connected pins named by
+  their t1..t6/tu/td labels (clock wedge -> CLK, pin 4 -> Qn);
+  left pins and up/down are inputs, right pins outputs. Warning.
+
+6.12 Ports
+  Port candidates (6.6) become in/out parts. Direction:
+  1. net has a driver (gate/mux/dff/block output or constant) -> output;
+  2. otherwise, if the net has loads -> input;
+  3. otherwise (only ports, or unconnected): label side left/west /
+     anchor=east -> input, right/east/anchor=west -> output;
+  4. otherwise left half of the drawing -> input, right half -> output.
+  On a net with only ports (pass-through), the leftmost one is the input.
+  Names: label text, else a meaningful node name, else Design.autoName.
+  Auto ports: a net with a dangling wire end and no port gets one at
+  that end: output if the net has a driver, else input. Name from a
+  text label at that end, else auto. Warning lists auto ports.
+
+6.13 Modules and blocks
+  Each environment is a module (6.2). After all are read, a block whose
+  module name equals a parsed module's name becomes an internal
+  reference (ref = that module id, ports = []); pins match by name.
+  Others stay external (ext + ports). First module is active unless
+  "% module:" names say otherwise (top = a module not instantiated by
+  others, as in schematic.js pickTop).
+
+6.14 Placement on the canvas
+  px = cm / S, y flipped, origin moved so the drawing starts at (48, 48).
+  Parts positioned so their centre matches the CircuiTikZ bbox centre;
+  ports and constants so their pin matches the pole point. Snap to the
+  8 px grid. For TeX not produced by us (no "Generated by Schematic
+  Designer" line), if any part boxes overlap, multiply all positions by
+  1.25 (up to 4 times) until they do not.
+
+6.15 Result
+  doc built with the Design data model, Design.prune(doc) applied.
+  warnings: unsupported statements/shapes, auto ports, dropped pins,
+  added NOT gates, label cleaning, etc.
+  If no node and no wire is found:
+    { doc: null, error: 'No CircuiTikZ nodes or wires found' }.
+
+
+----------------------------------------------------------------------
+7. PDF SPEC: "DOWNLOAD PDF"
+----------------------------------------------------------------------
+7.1 Service: LaTeX-on-HTTP by YtoTech, https://latex.ytotech.com
+  (TeX Live, circuitikz included). Must be re-verified in Step 7 from
+  file:// (Origin "null"): CORS preflight should allow content-type.
+  Body must be application/json (text/plain gets HTTP 415).
+
+7.2 Request
+  POST https://latex.ytotech.com/builds/sync
+  Content-Type: application/json
+  { "compiler": "pdflatex",
+    "resources": [ { "main": true, "content": "<full TeX document>" } ] }
+
+7.3 Responses
+  201, Content-Type application/pdf : the PDF (~1 s). Non-fatal TeX
+       errors still give a PDF. Use designer.js download() with a Blob.
+  400, JSON {"error":"COMPILATION_ERROR","log_files":
+       {"__main_document__.log":"..."}} : show the first log line that
+       matches /^\.\/[^:]*:(\d+): (.*)$/ or /^! (.*)$/, with the line
+       number.
+  other / network failure : message plus the TeXLive.net fallback.
+  60 s timeout through AbortController when available.
+
+7.4 Wrapping (CircuiTikZ.wrapDocument(text))
+  If the text has \documentclass, send it unchanged. Otherwise wrap:
+    \documentclass[border=10pt]{standalone}  (multi=circuitikz when more
+                                               than one environment)
+    \usepackage{circuitikz}  + any \usepackage/\usetikzlibrary lines
+                               moved out of the snippet
+    \begin{document} ... \end{document}
+  and if there is no environment either, put the lines inside
+  \begin{circuitikz} ... \end{circuitikz}.
+  Designer exports are bare tikzpicture snippets; wrapping is required
+  for PDF.
+
+7.5 Fallback: "Open on TeXLive.net"
+  A hidden <form method=post enctype=multipart/form-data target=_blank
+  action="https://texlive.net/cgi-bin/latexcgi"> with fields
+  filecontents[] = TeX, filename[] = document.tex, engine = pdflatex,
+  return = pdf. The PDF opens in a new tab (no CORS needed). TeXLive.net
+  cannot be used with fetch: its answer is a 301 without CORS headers.
+
+7.6 Privacy
+  Compiling sends the TeX to a third-party server. The button tooltip
+  and the dialog status must say so. Nothing is sent before the user
+  clicks Download PDF or Open on TeXLive.net.
+
+7.7 Rejected alternatives (do not revive)
+  - Local server with tectonic/pdflatex: removed in daaaa3d.
+  - SwiftLaTeX / texlive.js in the browser: tens of MB, needs package
+    files from a CDN, does not work reliably from file://.
+  - latexonline.cc: no CORS headers.
+
+
+----------------------------------------------------------------------
+8. UI SPEC
+----------------------------------------------------------------------
+8.1 designer.html
+  - Header, next to "Export .v":
+      <button id="tex" type="button"
+        title="Convert the drawing to CircuiTikZ (LaTeX) and back">
+        CircuiTikZ</button>
+  - Sheet bar (shared modal): two selects shown only in TeX mode:
+      #texStyle  (American / European / IEEE)
+      #texScope  (This module / All modules)
+  - New footer bar #texBar (same look as #importBar), hidden by default:
+      status text #texStatus, then buttons:
+        "From drawing"        #texRegen
+        "Copy"                #texCopy
+        "Download .tex"       #texSave
+        "Open on TeXLive.net" #texOnline
+        "Download PDF"        #texPdf   (class ghost)
+        "Convert to schematic" #texToSch (class primary)
+  - The TeX textarea fills the sheet body (class tex, monospace,
+    white-space: pre, no wrap). Add CSS:
+      #sheetBody textarea.tex { height: calc(100% - 24px); white-space: pre; }
+  - <script src="circuitikz.js"></script> AFTER design.js, BEFORE
+    designer.js.
+  - File input accept adds .tex,.tikz,.pgf
+
+8.2 designer.js
+  - state.tex = { style, scope, dirty, busy };
+    style remembered in localStorage ("verilog-schematic-designer-tex").
+  - openTex(): show the modal in TeX mode (hide #importBar and
+    #sheetMod, show #texBar and the selects), fill the textarea with
+    CircuiTikZ.toTex(state.doc, { style, scope }).tex, dirty = false.
+    Sheet title: "CircuiTikZ". Remove .compact from #sheet so the
+    textarea is tall.
+  - Editing the textarea sets dirty. Changing style/scope or "From
+    drawing" regenerates; when dirty, confirm() first.
+  - "Convert to schematic": importTex(text) -> same steps as
+    importVerilog (pushUndo, replace doc, notes = warnings, fit). On
+    error keep the dialog open and show the error in #texStatus.
+  - "Download PDF": disabled while busy; status
+    "Compiling on latex.ytotech.com (sends this TeX to a third-party
+    server)..."; on success download "<module>.pdf" and show size and
+    time; on failure show the parsed error.
+  - "Open on TeXLive.net": form post of 7.5.
+  - "Copy" / "Download .tex" act on the textarea text.
+  - openPreview / openImport hide the TeX controls; closeSheet resets
+    mode.
+  - Import dialog and file open: if CircuiTikZ.looksLikeTex(text) or
+    the file name ends in .tex/.tikz/.pgf, use importTex instead of
+    Verilog. Change Import placeholder to mention TeX as well.
+  - Esc closes the dialog (existing behaviour).
+
+8.3 importVerilog remaining fix (section 9 F4)
+  Change:
+    var out = Design.fromCompiled(c);
+  to:
+    var out = Design.fromCompiled(c, { externals: Design.externalStubs(src) });
+
+
+----------------------------------------------------------------------
+9. VERILOG CONVERTER AUDIT
+----------------------------------------------------------------------
+Method: for each feature, run both directions and compare.
+  A) drawing -> Design.toVerilog -> Schematic.compile -> layout ->
+     Design.fromCompiled -> drawing: same part types, inputs, flip-flop
+     settings, connectivity, port names, net names.
+  B) Verilog -> compile -> fromCompiled -> toVerilog -> compile: same
+     cell kinds per module, same drivers per named net.
+
+Findings. "IN design.js (uncommitted)" means the working-tree file
+already has the fix; the implementing agent must KEEP it and add tests
++ the designer.js wiring.
+
+F1  Net names lost on import.
+    HEAD fromCompiled created every net with name ''. Internal wires
+    came back as n, n_2... instead of s1, c1.
+    FIX IN design.js: name = safeLabel(net.label) for labelled,
+    non-constant nets. Port nets still clear the name so report()
+    prefers the port (keep that).
+    STATUS: in working-tree design.js. Needs a test.
+
+F2  Gates with more than 8 inputs lose connections.
+    schematic.js names inputs A..H then I8, I9...; HEAD fromCompiled
+    clamped inputs to 8 and dropped extra pins silently
+    (assign y = a&b&c&d&e&f&g&h&i).
+    FIX IN design.js: split into a tree. Inner gates use the
+    non-inverting kind (nand->and, nor->or, xnor->xor), the root keeps
+    the original kind; chunks of 8; new internal nets; warning.
+    1-input and/or/xor become buf, 1-input nand/nor/xnor become not
+    (HEAD tied the empty second input to 0, which changes AND/NAND).
+    STATUS: in working-tree design.js (gateTree). Needs a test.
+
+F3  Reserved words incomplete.
+    HEAD KEY lacked most Verilog-2005 keywords (case, initial,
+    function, integer, parameter, for, wire types...) and the
+    SystemVerilog keywords Icarus reserves for .sv (logic, bit, int).
+    A port named `case` exported invalid Verilog. ident() also let a
+    name start with '$'.
+    FIX IN design.js: full IEEE 1364-2005 list plus IEEE 1800-2012
+    keywords; prefix 'n_' for a leading digit OR '$'.
+    STATUS: in working-tree design.js. Needs a test.
+
+F4  External modules become empty internal modules after Export .v ->
+    Import.
+    report() writes an empty stub module for each external block; on
+    import that stub became a real (empty) module tab and the block
+    referred to it.
+    FIX IN design.js: report() writes
+      // External module stub (no logic). Replace with the real module.
+    before each stub. Design.externalStubs(src) returns those names;
+    fromCompiled(c, { externals }) skips creating those modules
+    (unless top) and keeps instances as external blocks.
+    STILL MISSING: designer.js importVerilog does not pass externals.
+    That is the remaining product bug. Fix in Step 2.
+
+F5  Several external blocks with the same module name but different
+    ports: HEAD stub took the first block's ports only.
+    FIX IN design.js: union of port names across all instances (first
+    direction wins). Duplicate port names on one block: one connection
+    only, plus an error issue.
+    STATUS: in working-tree design.js. Needs a test.
+
+F6  Flip-flop clock or reset tied to a constant (c0/c1 wired to
+    CLK/RST) was silently replaced by a floating wire open_clk /
+    open_rst.
+    FIX IN design.js: declare a wire, emit "assign <wire> = 1'b0;"
+    (or 1'b1) and warn. Round trip then brings back the same constant
+    part on that pin.
+    STATUS: in working-tree design.js (constEdge). Needs a test.
+
+F7  Dead code: empty `deferred` array/loop in emitModule.
+    STATUS: already gone in working-tree design.js. No extra work.
+
+Checked and correct (keep, cover with tests): primitive gates keep
+NAND/NOR/XNOR/BUF identities; mux "assign y = s ? d1 : d0"; dff groups
+with async reset/set and edges; output reg; extra output ports get
+assign; pass-through ports; constants; multi-driver and loop issues;
+hierarchy with internal module references.
+
+Known limits (documented, not changed):
+  - Bus ports are bit-blasted into scalar ports (x[0] -> x_0).
+  - always blocks that are not plain flip-flops or combinational
+    assigns (for example enables) come in as module stubs
+    (schematic.js limitation; do not change schematic.js).
+  - Flip-flop/mux part names follow the viewer (dff_q, mux) after a
+    Verilog round trip.
+
+
+----------------------------------------------------------------------
+10. TEST PLAN
+----------------------------------------------------------------------
+Runner: test.html in a browser (prints "ok" or failures), or Node:
+  node test_design.js && node test_circuitikz.js
+Both files share the same expect() style. test.html loads schematic.js,
+design.js, circuitikz.js, test_design.js, test_circuitikz.js; each file
+appends its own result line.
+
+10.1 test_design.js additions (section 9)
+  - F1: full adder round trip keeps wire names s1, c1, c2 on the
+        imported drawing (check out.doc nets, not only the Verilog).
+  - F2: 9- and 12-input AND/NAND/XNOR round trip: every input connected,
+        logic kinds correct (inner and/or/xor, root original kind);
+        1-input primitives become buf/not.
+  - F3: ports named case, initial, logic, $x export valid identifiers.
+  - F4: external block -> Verilog -> fromCompiled with externals:
+        still one module, block still external with the same ports.
+        Also: importVerilog-equivalent call without externals vs with.
+  - F5: two external blocks with different ports -> stub has the union.
+  - F6: CLK tied to c0 -> Verilog has an assign of 1'b0 -> round trip
+        has a c0 part on CLK.
+  - Structural round trip of every example (half, full, mux, dff, shift)
+    already exists; keep it.
+
+10.2 test_circuitikz.js (new file)
+  - Geometry: CircuiTikZ.anchor() values equal section 4 (spot checks
+    per style). If Step 3 re-measurement changed a number, update both
+    the table in this file AND the test.
+  - Export: every example in every style produces nodes with the mapped
+    shapes, one \draw per connection, \documentclass present, balanced
+    braces; dff/mux/block options as specified. No diagonal `--`
+    between non-collinear pins.
+  - Round trip: toTex -> fromTex reproduces the drawing: same parts
+    (type, name, inputs, dff settings), same connectivity (compared as
+    sets of "partName.pin"), same net names, same positions within 8 px.
+    Also Verilog equality: Design.toVerilog of both docs compile to the
+    same cell kinds.
+  - Import of a CircuiTikZ-Designer style snippet (N1.. names, absolute
+    wire coordinates, label nodes on N.text, rotate=90, xscale=-1, T
+    junction with circ, crossing without circ).
+  - Import of hand-written TeX: unprefixed "and port" with
+    \ctikzset{logic ports=european}, anchor=, scope shift, relative
+    coordinates, to[short, o-] poles, inline node labels, Q-bar use,
+    flipflop D with add async SR.
+  - Errors: empty / non-TeX input gives an error; unknown shapes and
+    \foreach give warnings, not exceptions.
+  - looksLikeTex: true for a tikzpicture snippet, a full document, and
+    a .tex file that starts with comments then \begin{circuitikz};
+    false for JSON and for typical Verilog.
+
+10.3 Manual / online checks
+  - Compile the exported TeX of each example with YtoTech; look at the
+    PDF (no diagonal wires, dots only on real junctions, labels
+    readable) in all three styles.
+  - Open designer.html from disk (file://): CircuiTikZ dialog, style
+    switch, Download PDF, Open on TeXLive.net, Convert to schematic,
+    Import of a .tex file, undo after import, Verilog still works.
+
+
+----------------------------------------------------------------------
+11. ACCEPTANCE CRITERIA
+----------------------------------------------------------------------
+A1  All tests pass in Node and in test.html.
+A2  Exported TeX of every example compiles with pdflatex (YtoTech)
+    without errors, in all three styles, and looks right.
+A3  Drawing -> TeX -> drawing keeps types, names, connectivity, net
+    names and positions (8 px grid) for all examples.
+A4  A CircuiTikZ-Designer export with gates, flip-flops, poles and
+    wires imports with correct connectivity.
+A5  Download PDF works from designer.html opened from disk; errors
+    show a readable message; the TeXLive.net fallback opens a PDF in
+    a new tab.
+A6  Section 9 fixes are in and covered by tests; Verilog of existing
+    examples is unchanged except for the stub marker comment.
+A7  No server, no build step, no new dependency; ES5 style kept.
+A8  schematic.js, verilog.html, vendor/ are untouched.
+
+
+----------------------------------------------------------------------
+12. ORDERED TASK LIST
+----------------------------------------------------------------------
+Do not skip ahead. Each step names files and how to verify.
+
+Step 1  This file. Already written. Do not implement product code in
+        the same turn as writing the roadmap unless the owner asked.
+
+Step 2  Finish Verilog round-trip.
+        Files: design.js (keep working-tree fixes; do not revert),
+               designer.js (pass Design.externalStubs(src) into
+               fromCompiled), test_design.js (F1-F6 cases).
+        Verify: node test_design.js
+                Open test.html, confirm "ok".
+
+Step 3  circuitikz.js geometry layer.
+        Compile the appendix A probe against YtoTech / TeXLive.net log
+        return. If a number differs from section 4, update section 4
+        AND the code. Implement style tables, flip-flop table,
+        muxdemux formulas, CircuiTikZ.anchor(shape, name, opts), node
+        transforms. No export/import yet if you want a clean split,
+        but putting them in the same file is fine.
+
+Step 4  circuitikz.js export: toTex (placement, naming, node code,
+        router, dots, hints, document wrapper, escaping).
+        Verify: node snippet that prints toTex(Design.example('half')).tex
+        then POST it to latex.ytotech.com and inspect the PDF.
+
+Step 5  circuitikz.js import: lexer, environments, statements, paths,
+        coordinates, node recognition, union-find, ports, flip-flops,
+        muxdemux, modules, layout, warnings; looksLikeTex;
+        wrapDocument.
+
+Step 6  test_circuitikz.js + test.html script tags.
+        Verify: node test_circuitikz.js
+                Open test.html, both result lines "ok".
+
+Step 7  UI: designer.html (button, selects, bar, CSS, script tag,
+        accept) and designer.js (dialog, PDF, fallback, import
+        routing). Reuse download() for PDF Blobs.
+        Verify in a browser from file:// (not only 127.0.0.1):
+          CircuiTikZ dialog, style switch, From drawing, Copy,
+          Download .tex, Download PDF, Open on TeXLive.net,
+          Convert to schematic, Import of a .tex file, undo,
+          existing Verilog Preview / Export .v still work.
+
+Step 8  Final pass: all tests, online compile of all examples and
+        styles, browser check, review the diff. Do not commit unless
+        the owner asks.
+
+Suggested conventional commits (only if asked to commit):
+  docs: add CircuiTikZ roadmap
+  fix(design): keep net names and wide gates on Verilog import
+  fix(design): reserved words, external stubs, constant clocks
+  feat(circuitikz): export drawings to CircuiTikZ
+  feat(circuitikz): import CircuiTikZ into drawings
+  feat(designer): CircuiTikZ dialog with PDF download
+  test: CircuiTikZ round trips and Verilog audit cases
+
+
+----------------------------------------------------------------------
+13. RISKS, ASSUMPTIONS, OUT OF SCOPE
+----------------------------------------------------------------------
+Risks
+  R1 Online compiler down or API change -> clear error text and the
+     TeXLive.net fallback; the .tex download always works.
+  R2 Hand-written TikZ is a full programming language -> importer
+     supports the common subset (6.4, 6.5) and warns about the rest.
+  R3 CircuiTikZ geometry may change -> table in one place in
+     circuitikz.js; appendix A shows how to re-measure.
+  R4 Geometric matching can join wires that only touch by accident ->
+     small tolerance, explicit anchor references in our own export.
+
+Assumptions
+  S1 Sending TeX to latex.ytotech.com is acceptable when the user
+     clicks Download PDF (stated in the UI).
+  S2 Converting TeX replaces the whole drawing (like Verilog import);
+     Undo restores the previous drawing.
+  S3 Default gate style American; export scope = open module.
+
+Out of scope
+  Analog components, buses in TeX, rotating parts on our canvas, live
+  PDF preview, changes to schematic.js / verilog.html, a local TeX
+  server, npm, TypeScript.
+
+
+----------------------------------------------------------------------
+A. APPENDIX: MEASURING ANCHORS AGAIN
+----------------------------------------------------------------------
+Compile this with pdflatex and read the log (TeXLive.net can return
+the log: POST https://texlive.net/cgi-bin/latexcgi with
+filecontents[]=<tex>, filename[]=document.tex, engine=pdflatex,
+return=log):
+
+  \documentclass{article}
+  \usepackage{circuitikz}
+  \begin{document}
+  \newcommand\probe[3]{\pgfpointanchor{#1}{#2}\pgfgetlastxy{\ax}{\ay}%
+    \typeout{ANCHOR|#3|#2|\ax|\ay}}
+  \begin{tikzpicture}
+    \node[american and port, number inputs=3] (G) at (0,0) {};
+    \foreach \a in {in 1,in 2,in 3,out,north,south,east,west,center,text}
+      { \probe{G}{\a}{american and port|3} }
+  \end{tikzpicture}
+  \end{document}
+
+Each log line "ANCHOR|shape|N|anchor|x pt|y pt" gives the offset in pt;
+divide by 28.4528 for cm. Version check: \typeout{\pgfcircversion}.
+Repeat for european/ieeestd, not/buffer, flipflop D, muxdemux, ocirc,
+ground, vcc.
+
+
+----------------------------------------------------------------------
+B. APPENDIX: CIRCUITIKZ-DESIGNER EXPORT FORMAT
+----------------------------------------------------------------------
+From Designer source on 2026-10-17 (v0.8.2 live):
+  src/scripts/controllers/exportController.ts
+  src/scripts/utils/tikzBuilder.ts
+  src/scripts/components/nodeComponent.ts
+  src/scripts/components/nodeSymbolComponent.ts
+  src/scripts/mixins/labelable.ts
+  src/scripts/components/wireComponent.ts
+  src/data/symbols.svg  (tikz= attribute is the CircuiTikZ shape name,
+                         display= is the drawer name, group= is the
+                         category; pins listed per variant)
+
+Emitted text looks like:
+
+  [\usetikzlibrary{...}]
+  \begin{tikzpicture}[transform shape(, environment options)]
+      [\ctikzset{...}]
+      % Paths, nodes and wires:
+      \node[<tikz shape>(, options)(, rotate=R)(, xscale=-1)(, yscale=-1)]
+           (N1) at (x, y){} node[anchor=<a>] at ([xshift=..cm, yshift=..cm]N1.text){$label$};
+      \draw (x1, y1) -- (x2, y2) -| (x3, y3) |- (x4, y4);
+  \end{tikzpicture}
+
+Coordinates are absolute cm with 2 decimals; px -> cm at 96 dpi with y
+negated. Node names are N1, N2... (or the user's name). Wires do NOT
+reference anchors; they end on pin coordinates. There is no
+\documentclass; wrapDocument and the importer must handle bare
+snippets. Logic style is always explicit in the shape name
+("american and port"), never unprefixed.
+
+Designer JSON (Save) is a different format and is out of scope. We
+import TeX, not Designer JSON.
+
+
+----------------------------------------------------------------------
+C. APPENDIX: WHY THE PREVIOUS ATTEMPT WAS DELETED
+----------------------------------------------------------------------
+Commits 9b87f6c / 098c09f added circuitikz.js + a local Python server
+(serve.py running tectonic) + run.sh. Commit daaaa3d removed all of it.
+Do not restore serve.py or run.sh.
+
+Defects in the deleted circuitikz.js (do not copy):
+  - Global name CircuitTikZ (wrong); use CircuiTikZ.
+  - Forced european ports via \ctikzset; no style picker.
+  - Wires were \draw (a) -- (b) (diagonal).
+  - Constants were labeled circles, not ground/vcc.
+  - DFF reset sat on pin 2 instead of down/up.
+  - Blocks used \usetikzlibrary{calc} and rectangle nodes, so pin
+    coordinates were not first-class anchors.
+  - Scale PX=46 (not 96 dpi).
+  - Round-trip depended on "% SCH ..." comments instead of real TeX.
+  - PDF required a local tectonic server.
+
+git show 9b87f6c:circuitikz.js is a reference for the parser shape
+(readDelim, splitComma) but not for geometry, wires, or PDF.
+
+
+----------------------------------------------------------------------
+D. APPENDIX: REFERENCES
+----------------------------------------------------------------------
+  This project                 designer.html, designer.js, design.js,
+                               schematic.js, test_design.js, test.html
+  CircuiTikZ                   https://github.com/circuitikz/circuitikz
+                               tex/pgfcirctripoles.tex  (logic ports)
+                               tex/pgfcircmultipoles.tex (flipflop, muxdemux)
+  CircuiTikZ manual            https://texdoc.org/serve/circuitikz/0
+  CircuiTikZ-Designer live     https://www.circuit2tikz.tf.fau.de/designer/
+  Designer source              https://github.com/Circuit2TikZ/CircuiTikZ-Designer
+  Designer: no mux / N-input   https://github.com/Circuit2TikZ/CircuiTikZ-Designer/issues/23
+                               https://github.com/Circuit2TikZ/CircuiTikZ-Designer/issues/44
+  LaTeX-on-HTTP (YtoTech)      https://github.com/YtoTech/latex-on-http
+                               POST https://latex.ytotech.com/builds/sync
+  TeXLive.net                  https://texlive.net
+                               POST https://texlive.net/cgi-bin/latexcgi
