@@ -217,6 +217,33 @@ function posOk(a, b) {
   expect(CircuiTikZ.wrapDocument('\\documentclass{article}\n\\begin{document}x\\end{document}').indexOf('\\documentclass{article}') === 0, 'wrap keeps class');
 })();
 
+(function halfLanes() {
+  var tex = CircuiTikZ.toTex(Design.example('half')).tex;
+  function trunkX(name) {
+    var m = new RegExp('% net: ' + name + '\\n([\\s\\S]*?)(?=\\n  % net:|\\n\\\\end\\{circuitikz\\})').exec(tex);
+    expect(!!m, 'half net ' + name);
+    if (!m) return null;
+    var best = null;
+    var draws = m[1].match(/\\draw[\s\S]*?;/g) || [];
+    draws.forEach(function (d) {
+      var pts = [];
+      var re = /\(([+-]?\d*\.?\d+),\s*([+-]?\d*\.?\d+)\)/g;
+      var c;
+      while ((c = re.exec(d))) pts.push({ x: parseFloat(c[1]), y: parseFloat(c[2]) });
+      var i;
+      for (i = 1; i < pts.length; i++) {
+        var dy = Math.abs(pts[i].y - pts[i - 1].y);
+        if (Math.abs(pts[i].x - pts[i - 1].x) > 0.02 || dy < 0.3) continue;
+        if (!best || dy > best.dy) best = { x: pts[i].x, dy: dy };
+      }
+    });
+    return best;
+  }
+  var a = trunkX('a');
+  var b = trunkX('b');
+  expect(a && b && Math.abs(a.x - b.x) > 0.3, 'half trunks a=' + (a && a.x) + ' b=' + (b && b.x));
+})();
+
 if (typeof window !== 'undefined') {
   window.__testFailed = (window.__testFailed || 0) + ctFailed;
   var out = document.getElementById('out');

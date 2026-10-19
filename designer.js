@@ -279,8 +279,8 @@
     return null;
   }
 
-  function route(points) {
-    if (!points || points.length < 2) return { segs: [], dots: [] };
+  function planRoute(points) {
+    if (!points || points.length < 2) return null;
     var src = points[0];
     var i;
     for (i = 0; i < points.length; i++) {
@@ -297,7 +297,6 @@
       return { x: p.x, y: p.y - stub };
     }
     var s0 = tip(src);
-    var segs = [[src.x, src.y, s0.x, s0.y]];
     var forward = [];
     var back = [];
     for (i = 0; i < points.length; i++) {
@@ -306,37 +305,174 @@
       if (points[i].dir !== 'out' && points[i].dir !== 'inout' && t.x < s0.x - 8) back.push({ p: points[i], t: t });
       else forward.push({ p: points[i], t: t });
     }
-    var trunkX = s0.x;
+    var minF = s0.x;
     if (forward.length) {
-      var minF = forward[0].t.x;
+      minF = forward[0].t.x;
       forward.forEach(function (f) { if (f.t.x < minF) minF = f.t.x; });
-      if (minF > s0.x + 12) trunkX = (s0.x + minF) / 2;
     }
-    segs.push([s0.x, s0.y, trunkX, s0.y]);
     var ys = [s0.y];
+    var y0 = s0.y, y1 = s0.y;
     forward.forEach(function (f) {
       ys.push(f.t.y);
-      segs.push([trunkX, f.t.y, f.t.x, f.t.y]);
+      if (f.t.y < y0) y0 = f.t.y;
+      if (f.t.y > y1) y1 = f.t.y;
+    });
+    var bottom = src.y;
+    points.forEach(function (pt) { if (pt.y > bottom) bottom = pt.y; });
+    return {
+      points: points, src: src, s0: s0, forward: forward, back: back,
+      minF: minF, ys: ys, y0: y0, y1: y1, bottom: bottom
+    };
+  }
+
+  function sharesChannel(a, b) {
+    if (!a || !b || !a.forward.length || !b.forward.length) return false;
+    if (!(a.minF > a.s0.x + 12) || !(b.minF > b.s0.x + 12)) return false;
+    var midA = (a.s0.x + a.minF) / 2;
+    var midB = (b.s0.x + b.minF) / 2;
+    if (Math.abs(midA - midB) > 8) return false;
+    return !(a.y1 < b.y0 - 6 || b.y1 < a.y0 - 6);
+  }
+
+  /* Nets that would draw the same vertical trunk get side-by-side lanes,
+     so a and b in the half adder do not sit on one wire. */
+  function assignLanes(plans) {
+    var n = plans.length;
+    var parent = [];
+    var i, j;
+    for (i = 0; i < n; i++) parent[i] = i;
+    function find(a) {
+      while (parent[a] !== a) {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+      }
+      return a;
+    }
+    for (i = 0; i < n; i++) {
+      if (!plans[i]) continue;
+      for (j = i + 1; j < n; j++) {
+        if (sharesChannel(plans[i], plans[j])) parent[find(i)] = find(j);
+      }
+    }
+    var groups = {};
+    var lane = [];
+    var count = [];
+    for (i = 0; i < n; i++) {
+      if (!plans[i] || !sharesChannel(plans[i], plans[i])) {
+        lane[i] = 0;
+        count[i] = 1;
+        continue;
+      }
+      var root = find(i);
+      if (!groups[root]) groups[root] = [];
+      lane[i] = groups[root].length;
+      groups[root].push(i);
+    }
+    for (i = 0; i < n; i++) {
+      if (count[i] == null) count[i] = groups[find(i)].length;
+    }
+    return { lane: lane, count: count };
+  }
+
+  function trunkAt(plan, lane, count) {
+    var x0 = plan.s0.x;
+    var x1 = plan.minF;
+    if (!plan.forward.length || !(x1 > x0 + 12) || count <= 1) {
+      if (plan.forward.length && x1 > x0 + 12) return (x0 + x1) / 2;
+      return x0;
+    }
+    var gap = x1 - x0;
+    var inner = gap - 16;
+    var pitch = inner / (count - 1);
+    if (pitch > 16) return (x0 + x1) / 2 - 8 * (count - 1) + lane * 16;
+    return x0 + 8 + lane * pitch;
+  }
+
+  function nearJoint(y, x0, x1, joints) {
+    var lo = Math.min(x0, x1);
+    var hi = Math.max(x0, x1);
+    var i, d;
+    for (i = 0; i < joints.length; i++) {
+      d = joints[i];
+      if (d.x <= lo + 1 || d.x >= hi - 1) continue;
+      if (Math.abs(d.y - y) < 12) return true;
+    }
+    return false;
+  }
+
+  function jogOf(y, x0, x1, joints) {
+    if (!nearJoint(y, x0, x1, joints)) return 0;
+    var tries = [16, -16, 28, -28];
+    var i;
+    for (i = 0; i < tries.length; i++) {
+      if (!nearJoint(y + tries[i], x0, x1, joints)) return tries[i];
+    }
+    return 16;
+  }
+
+  /* A straight run that passes another net's junction reads as a connection.
+     Bend across that junction and come back to the pin. */
+  function hrun(segs, x0, y, x1, joints) {
+    var jog = jogOf(y, x0, x1, joints);
+    if (!jog || Math.abs(x1 - x0) < 36) {
+      segs.push([x0, y, x1, y]);
+      return;
+    }
+    var lo = Math.min(x0, x1);
+    var hi = Math.max(x0, x1);
+    var xs = [];
+    var i;
+    for (i = 0; i < joints.length; i++) {
+      var d = joints[i];
+      if (d.x > lo + 4 && d.x < hi - 4 && Math.abs(d.y - y) < 12) xs.push(d.x);
+    }
+    if (!xs.length) {
+      segs.push([x0, y, x1, y]);
+      return;
+    }
+    var dir = x1 >= x0 ? 1 : -1;
+    var enter = dir > 0 ? Math.min.apply(null, xs) : Math.max.apply(null, xs);
+    var leave = dir > 0 ? Math.max.apply(null, xs) : Math.min.apply(null, xs);
+    var xIn = enter - dir * 10;
+    var xOut = leave + dir * 10;
+    if (dir > 0) {
+      if (xIn < x0 + 8) xIn = x0 + 8;
+      if (xOut > x1 - 8) xOut = x1 - 8;
+      if (xOut <= xIn) { segs.push([x0, y, x1, y]); return; }
+    } else {
+      if (xIn > x0 - 8) xIn = x0 - 8;
+      if (xOut < x1 + 8) xOut = x1 + 8;
+      if (xOut >= xIn) { segs.push([x0, y, x1, y]); return; }
+    }
+    var y2 = y + jog;
+    segs.push([x0, y, xIn, y]);
+    segs.push([xIn, y, xIn, y2]);
+    segs.push([xIn, y2, xOut, y2]);
+    segs.push([xOut, y2, xOut, y]);
+    segs.push([xOut, y, x1, y]);
+  }
+
+  function route(plan, trunkX, joints) {
+    joints = joints || [];
+    var src = plan.src;
+    var s0 = plan.s0;
+    var ys = plan.ys;
+    var segs = [[src.x, src.y, s0.x, s0.y]];
+    hrun(segs, s0.x, s0.y, trunkX, joints);
+    plan.forward.forEach(function (f) {
+      hrun(segs, trunkX, f.t.y, f.t.x, joints);
       segs.push([f.t.x, f.t.y, f.p.x, f.p.y]);
     });
-    if (ys.length >= 2) {
-      var lo = ys[0], hi = ys[0];
-      ys.forEach(function (y) { if (y < lo) lo = y; if (y > hi) hi = y; });
-      segs.push([trunkX, lo, trunkX, hi]);
-    }
-    var bottom = src.y;
-    points.forEach(function (p) { if (p.y > bottom) bottom = p.y; });
-    back.forEach(function (b, idx) {
-      var yf = bottom + 28 + idx * 14;
-      var topY = ys[0];
-      ys.forEach(function (y) { if (y < topY) topY = y; });
+    if (ys.length >= 2) segs.push([trunkX, plan.y0, trunkX, plan.y1]);
+    plan.back.forEach(function (b, idx) {
+      var yf = plan.bottom + 28 + idx * 14;
       segs.push([b.p.x, b.p.y, b.t.x, b.t.y]);
       segs.push([b.t.x, b.t.y, b.t.x, yf]);
-      segs.push([b.t.x, yf, trunkX, yf]);
-      segs.push([trunkX, yf, trunkX, topY]);
+      hrun(segs, b.t.x, yf, trunkX, joints);
+      segs.push([trunkX, yf, trunkX, plan.y0]);
     });
     var dots = [];
-    if (points.length >= 3) ys.forEach(function (y) { dots.push([trunkX, y]); });
+    if (plan.points.length >= 3) ys.forEach(function (y) { dots.push([trunkX, y]); });
     return { segs: segs, dots: dots };
   }
 
@@ -488,6 +624,8 @@
     var mod = active();
     if (!mod) return;
     var lab = state.report && state.report.labels[mod.id];
+    var drawNets = [];
+    var plans = [];
     mod.nets.forEach(function (net) {
       var pts = [];
       net.pins.forEach(function (ref) {
@@ -496,7 +634,22 @@
         var pin = pinWorld(part, ref.pin);
         if (pin) pts.push(pin);
       });
-      var routed = route(pts);
+      var plan = planRoute(pts);
+      if (!plan) return;
+      drawNets.push(net);
+      plans.push(plan);
+    });
+    var lanes = assignLanes(plans);
+    var trunks = [];
+    var joints = [];
+    plans.forEach(function (plan, i) {
+      trunks[i] = trunkAt(plan, lanes.lane[i], lanes.count[i]);
+      plan.ys.forEach(function (y) { joints.push({ net: i, x: trunks[i], y: y }); });
+    });
+    drawNets.forEach(function (net, ni) {
+      var foreign = [];
+      joints.forEach(function (j) { if (j.net !== ni) foreign.push(j); });
+      var routed = route(plans[ni], trunks[ni], foreign);
       if (!routed.segs.length) return;
       var d = '';
       routed.segs.forEach(function (s) {

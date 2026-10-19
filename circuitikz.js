@@ -256,6 +256,135 @@
     return a.y - b.y || a.x - b.x || String(a.id).localeCompare(String(b.id));
   }
 
+  function sharesChannel(a, b) {
+    if (!a || !b || !a.forward.length || !b.forward.length) return false;
+    if (!(a.minF > a.s0.x + 12 * S) || !(b.minF > b.s0.x + 12 * S)) return false;
+    var midA = (a.s0.x + a.minF) / 2;
+    var midB = (b.s0.x + b.minF) / 2;
+    if (Math.abs(midA - midB) > 8 * S) return false;
+    return !(a.y1 < b.y0 - 6 * S || b.y1 < a.y0 - 6 * S);
+  }
+
+  function assignLanes(plans) {
+    var n = plans.length;
+    var parent = [];
+    var i, j;
+    for (i = 0; i < n; i++) parent[i] = i;
+    function find(a) {
+      while (parent[a] !== a) {
+        parent[a] = parent[parent[a]];
+        a = parent[a];
+      }
+      return a;
+    }
+    for (i = 0; i < n; i++) {
+      if (!plans[i]) continue;
+      for (j = i + 1; j < n; j++) {
+        if (sharesChannel(plans[i], plans[j])) parent[find(i)] = find(j);
+      }
+    }
+    var groups = {};
+    var lane = [];
+    var count = [];
+    for (i = 0; i < n; i++) {
+      if (!plans[i] || !sharesChannel(plans[i], plans[i])) {
+        lane[i] = 0;
+        count[i] = 1;
+        continue;
+      }
+      var root = find(i);
+      if (!groups[root]) groups[root] = [];
+      lane[i] = groups[root].length;
+      groups[root].push(i);
+    }
+    for (i = 0; i < n; i++) {
+      if (count[i] == null) count[i] = groups[find(i)].length;
+    }
+    return { lane: lane, count: count };
+  }
+
+  function trunkAt(plan, lane, count) {
+    var x0 = plan.s0.x;
+    var x1 = plan.minF;
+    if (!plan.forward.length || !(x1 > x0 + 12 * S) || count <= 1) {
+      if (plan.forward.length && x1 > x0 + 12 * S) return (x0 + x1) / 2;
+      return x0;
+    }
+    var gap = x1 - x0;
+    var inner = gap - 16 * S;
+    var pitch = inner / (count - 1);
+    if (pitch > 16 * S) return (x0 + x1) / 2 - 8 * S * (count - 1) + lane * 16 * S;
+    return x0 + 8 * S + lane * pitch;
+  }
+
+  function nearJoint(y, x0, x1, joints) {
+    var lo = Math.min(x0, x1);
+    var hi = Math.max(x0, x1);
+    var i, d;
+    for (i = 0; i < joints.length; i++) {
+      d = joints[i];
+      if (d.x <= lo + S || d.x >= hi - S) continue;
+      if (Math.abs(d.y - y) < 12 * S) return true;
+    }
+    return false;
+  }
+
+  function jogOf(y, x0, x1, joints) {
+    if (!nearJoint(y, x0, x1, joints)) return 0;
+    var tries = [16 * S, -16 * S, 28 * S, -28 * S];
+    var i;
+    for (i = 0; i < tries.length; i++) {
+      if (!nearJoint(y + tries[i], x0, x1, joints)) return tries[i];
+    }
+    return 16 * S;
+  }
+
+  function hrun(x0, y, x1, joints) {
+    var straight = [{ x: x0, y: y }, { x: x1, y: y }];
+    var jog = jogOf(y, x0, x1, joints);
+    if (!jog || Math.abs(x1 - x0) < 36 * S) return straight;
+    var lo = Math.min(x0, x1);
+    var hi = Math.max(x0, x1);
+    var xs = [];
+    var i;
+    for (i = 0; i < joints.length; i++) {
+      var d = joints[i];
+      if (d.x > lo + 4 * S && d.x < hi - 4 * S && Math.abs(d.y - y) < 12 * S) xs.push(d.x);
+    }
+    if (!xs.length) return straight;
+    var dir = x1 >= x0 ? 1 : -1;
+    var enter = dir > 0 ? Math.min.apply(null, xs) : Math.max.apply(null, xs);
+    var leave = dir > 0 ? Math.max.apply(null, xs) : Math.min.apply(null, xs);
+    var xIn = enter - dir * 10 * S;
+    var xOut = leave + dir * 10 * S;
+    if (dir > 0) {
+      if (xIn < x0 + 8 * S) xIn = x0 + 8 * S;
+      if (xOut > x1 - 8 * S) xOut = x1 - 8 * S;
+      if (xOut <= xIn) return straight;
+    } else {
+      if (xIn > x0 - 8 * S) xIn = x0 - 8 * S;
+      if (xOut < x1 + 8 * S) xOut = x1 + 8 * S;
+      if (xOut >= xIn) return straight;
+    }
+    var y2 = y + jog;
+    return [
+      { x: x0, y: y }, { x: xIn, y: y }, { x: xIn, y: y2 },
+      { x: xOut, y: y2 }, { x: xOut, y: y }, { x: x1, y: y }
+    ];
+  }
+
+  function joinRuns(a, b) {
+    var out = a.slice();
+    var i;
+    for (i = 0; i < b.length; i++) {
+      var p = b[i];
+      var q = out[out.length - 1];
+      if (q && Math.abs(q.x - p.x) < 1e-6 && Math.abs(q.y - p.y) < 1e-6) continue;
+      out.push(p);
+    }
+    return out;
+  }
+
   function shapeName(part, style) {
     if (MULTI[part.type]) return style + ' ' + part.type + ' port';
     if (part.type === 'not') return style + ' not port';
@@ -471,6 +600,7 @@
           dir: dir
         };
       }
+      var wirePlans = [];
       (mod.nets || []).forEach(function (net) {
         var ends = [];
         (net.pins || []).forEach(function (ref) {
@@ -484,8 +614,6 @@
         });
         if (ends.length < 2) return;
         var info = lab.nets && lab.nets[net.id];
-        var hint = (info && info.vname) || net.name || '';
-        if (hint) lines.push('  % net: ' + hint);
         var src = ends[0];
         ends.forEach(function (e) {
           var srcOut = src.dir === 'out' || src.dir === 'inout';
@@ -507,52 +635,81 @@
           if (e.dir !== 'out' && e.dir !== 'inout' && t.x < s0.x - 0.21) back.push(e);
           else forward.push(e);
         });
-        var trunk = s0.x;
+        var minF = s0.x;
         if (forward.length) {
-          var minF = tip(forward[0]).x;
+          minF = tip(forward[0]).x;
           forward.forEach(function (e) { var tx = tip(e).x; if (tx < minF) minF = tx; });
-          if (minF > s0.x + 0.32) trunk = (s0.x + minF) / 2;
         }
-        var dx = r2(trunk - src.x);
+        var ys = [src.y];
+        forward.forEach(function (e) {
+          ys.push(e.side === 'b' ? e.y - 0.42 : (e.side === 't' ? e.y + 0.42 : e.y));
+        });
+        var y0 = ys[0], y1 = ys[0], yi;
+        for (yi = 1; yi < ys.length; yi++) {
+          if (ys[yi] < y0) y0 = ys[yi];
+          if (ys[yi] > y1) y1 = ys[yi];
+        }
         var low = ends[0].y;
         ends.forEach(function (e) { if (e.y < low) low = e.y; });
+        wirePlans.push({
+          net: net, ends: ends, src: src, forward: forward, back: back,
+          s0: s0, minF: minF, ys: ys, y0: y0, y1: y1, low: low,
+          hint: (info && info.vname) || net.name || ''
+        });
+      });
+      var lanes = assignLanes(wirePlans);
+      var trunks = [];
+      var joints = [];
+      wirePlans.forEach(function (plan, i) {
+        trunks[i] = r2(trunkAt(plan, lanes.lane[i], lanes.count[i]));
+        plan.ys.forEach(function (y) { joints.push({ net: i, x: trunks[i], y: y }); });
+      });
+      wirePlans.forEach(function (plan, ni) {
+        if (plan.hint) lines.push('  % net: ' + plan.hint);
+        var foreign = [];
+        joints.forEach(function (j) { if (j.net !== ni) foreign.push(j); });
+        var src = plan.src;
+        var trunk = trunks[ni];
         var segs = [];
         function addSeg(a, b) {
           if (Math.abs(a.x - b.x) < 1e-6 && Math.abs(a.y - b.y) < 1e-6) return;
-          segs.push(a, b);
+          segs.push({ x: r2(a.x), y: r2(a.y) }, { x: r2(b.x), y: r2(b.y) });
         }
-        function emit(load, kind, extra) {
-          var tail = '(' + load.ref + ')';
-          if (kind === 'b') lines.push('  \\draw (' + src.ref + ') -- ++(' + num(dx) + ',0) |- ([yshift=-0.42cm]' + load.ref + ') -- ' + tail + ';');
-          else if (kind === 't') lines.push('  \\draw (' + src.ref + ') -- ++(' + num(dx) + ',0) |- ([yshift=0.42cm]' + load.ref + ') -- ' + tail + ';');
-          else if (kind === 'back') lines.push('  \\draw (' + src.ref + ') -- ++(' + num(dx) + ',0) |- (' + num(extra.xL) + ', ' + num(extra.yB) + ') |- ' + tail + ';');
-          else lines.push('  \\draw (' + src.ref + ') -- ++(' + num(dx) + ',0) |- ' + tail + ';');
-          var p0 = { x: src.x, y: src.y };
-          var p1 = { x: src.x + dx, y: src.y };
-          addSeg(p0, p1);
-          if (kind === 'b' || kind === 't') {
-            var yy = load.y + (kind === 'b' ? -0.42 : 0.42);
-            addSeg(p1, { x: p1.x, y: yy });
-            addSeg({ x: p1.x, y: yy }, { x: load.x, y: yy });
-            addSeg({ x: load.x, y: yy }, { x: load.x, y: load.y });
-          } else if (kind === 'back') {
-            addSeg(p1, { x: p1.x, y: extra.yB });
-            addSeg({ x: p1.x, y: extra.yB }, { x: extra.xL, y: extra.yB });
-            addSeg({ x: extra.xL, y: extra.yB }, { x: extra.xL, y: load.y });
-            addSeg({ x: extra.xL, y: load.y }, { x: load.x, y: load.y });
-          } else {
-            addSeg(p1, { x: p1.x, y: load.y });
-            addSeg({ x: p1.x, y: load.y }, { x: load.x, y: load.y });
+        function emit(pts, endRef) {
+          var bits = ['(' + src.ref + ')'];
+          var prev = { x: r2(src.x), y: r2(src.y) };
+          var i;
+          for (i = 1; i < pts.length; i++) {
+            var x = r2(pts[i].x);
+            var y = r2(pts[i].y);
+            if (Math.abs(prev.x - x) < 1e-6 && Math.abs(prev.y - y) < 1e-6) continue;
+            addSeg(prev, { x: x, y: y });
+            bits.push('(' + num(x) + ', ' + num(y) + ')');
+            prev = { x: x, y: y };
           }
+          if (endRef) bits.push('(' + endRef + ')');
+          if (bits.length >= 2) lines.push('  \\draw ' + bits.join(' -- ') + ';');
         }
-        forward.forEach(function (load) {
-          var kind = load.side === 'b' ? 'b' : (load.side === 't' ? 't' : 'lr');
-          emit(load, kind);
+        plan.forward.forEach(function (load) {
+          var run;
+          if (load.side === 'b' || load.side === 't') {
+            var ay = load.y + (load.side === 'b' ? -0.42 : 0.42);
+            run = joinRuns(hrun(src.x, src.y, trunk, foreign), hrun(trunk, ay, load.x, foreign));
+            run.push({ x: load.x, y: load.y });
+          } else {
+            run = joinRuns(hrun(src.x, src.y, trunk, foreign), hrun(trunk, load.y, load.x, foreign));
+          }
+          emit(run, load.ref);
         });
-        back.forEach(function (load, idx) {
-          emit(load, 'back', { xL: load.x - 0.42, yB: low - 0.74 - 0.37 * idx });
+        plan.back.forEach(function (load, idx) {
+          var xL = load.x - 0.42;
+          var yB = plan.low - 0.74 - 0.37 * idx;
+          var run = joinRuns(hrun(src.x, src.y, trunk, foreign), [{ x: trunk, y: src.y }, { x: trunk, y: yB }]);
+          run = joinRuns(run, hrun(trunk, yB, xL, foreign));
+          run = joinRuns(run, [{ x: xL, y: yB }, { x: xL, y: load.y }, { x: load.x, y: load.y }]);
+          emit(run, load.ref);
         });
-        var dots = junctionDots(segs, ends);
+        var dots = junctionDots(segs, plan.ends);
         dots.forEach(function (d) {
           lines.push('  \\node[circ] at (' + num(d.x) + ', ' + num(d.y) + ') {};');
         });
