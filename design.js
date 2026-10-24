@@ -1308,6 +1308,294 @@
     return report(doc).verilog;
   }
 
+  /* Clock and reset names. A pin with one of these names is only treated as
+     a clock or reset when a flip-flop actually uses it. */
+  function nameKind(name) {
+    var n = String(name || '').toLowerCase();
+    if (n === 'clk' || n === 'clock' || n === 'clk_n' || n === 'clkn' || n === 'clk_p') return 'clock';
+    if (n === 'rst' || n === 'reset' || n === 'rst_n' || n === 'reset_n' || n === 'rstn' || n === 'resetn' ||
+        n === 'clr' || n === 'clear' || n === 'set' || n === 'set_n') return 'reset';
+    return '';
+  }
+
+  function nameActive(name) {
+    var n = String(name || '').toLowerCase();
+    if (/_n$/.test(n) || n === 'rstn' || n === 'resetn') return 0;
+    return 1;
+  }
+
+  function flopDepth(doc, mod, stack) {
+    if (!mod) return 0;
+    if (stack[mod.id]) return 0;
+    stack[mod.id] = 1;
+    var local = 0;
+    var below = 0;
+    (mod.parts || []).forEach(function (p) {
+      if (p.type === 'dff') local++;
+      else if (p.type === 'block' && p.ref) below += flopDepth(doc, moduleById(doc, p.ref), stack);
+    });
+    stack[mod.id] = 0;
+    return local + below;
+  }
+
+  function loadRole(doc, part, pin) {
+    var sub, kind;
+    if (!part) return '';
+    if (part.type === 'dff') {
+      if (pin === 'CLK') return 'clock';
+      if (pin === 'RST' || pin === 'SET') return 'reset';
+      return '';
+    }
+    if (part.type !== 'block') return '';
+    kind = nameKind(pin);
+    if (!kind) return '';
+    sub = part.ref ? moduleById(doc, part.ref) : null;
+    if (part.ref && flopDepth(doc, sub, {}) === 0) return '';
+    return kind;
+  }
+
+  function blockResetActive(doc, part, pin) {
+    var sub = part && part.ref ? moduleById(doc, part.ref) : null;
+    var port = null;
+    var active = null;
+    if (!sub) return nameActive(pin);
+    sub.parts.forEach(function (p) {
+      if (p.type === 'in' && p.name === pin) port = p;
+    });
+    if (!port) return nameActive(pin);
+    (sub.nets || []).forEach(function (net) {
+      var drives = (net.pins || []).some(function (r) { return r.part === port.id && r.pin === 'Y'; });
+      if (!drives) return;
+      (net.pins || []).forEach(function (r) {
+        var dest = null;
+        sub.parts.forEach(function (p) { if (p.id === r.part) dest = p; });
+        if (dest && dest.type === 'dff' && (r.pin === 'RST' || r.pin === 'SET')) {
+          active = dest.rstEdge === 'neg' ? 0 : 1;
+        }
+      });
+    });
+    return active == null ? nameActive(pin) : active;
+  }
+
+  function classifyInputs(doc, mod, ports) {
+    var byId = Object.create(null);
+    var loads = Object.create(null);
+    var depth = flopDepth(doc, mod, {});
+    var clocks = [];
+    var resets = [];
+    var data = [];
+    (mod.parts || []).forEach(function (p) { byId[p.id] = p; });
+    (mod.nets || []).forEach(function (net) {
+      var src = null;
+      (net.pins || []).forEach(function (ref) {
+        var part = byId[ref.part];
+        if (part && part.type === 'in' && ref.pin === 'Y') src = part.id;
+      });
+      if (!src) return;
+      (net.pins || []).forEach(function (ref) {
+        var part;
+        if (ref.part === src) return;
+        part = byId[ref.part];
+        if (!part) return;
+        if (!loads[src]) loads[src] = [];
+        loads[src].push({ part: part, pin: ref.pin });
+      });
+    });
+    ports.forEach(function (p) {
+      var part, list, clocksN, resetsN, other, votes, kind, active, zeros, nk;
+      if (p.dir !== 'input') return;
+      part = byId[p.partId];
+      list = (part && loads[part.id]) || [];
+      clocksN = 0;
+      resetsN = 0;
+      other = 0;
+      votes = [];
+      list.forEach(function (ld) {
+        var role = loadRole(doc, ld.part, ld.pin);
+        if (role === 'clock') clocksN++;
+        else if (role === 'reset') {
+          resetsN++;
+          if (ld.part.type === 'dff') votes.push(ld.part.rstEdge === 'neg' ? 0 : 1);
+          else if (ld.part.type === 'block') votes.push(blockResetActive(doc, ld.part, ld.pin));
+          else votes.push(nameActive(ld.pin));
+        } else other++;
+      });
+      kind = '';
+      active = 1;
+      if (clocksN) kind = 'clock';
+      else if (resetsN && !other) {
+        kind = 'reset';
+        zeros = votes.filter(function (v) { return v === 0; }).length;
+        active = zeros > votes.length / 2 ? 0 : 1;
+      } else if (!list.length && depth > 0) {
+        nk = nameKind(p.vname);
+        if (nk === 'clock') kind = 'clock';
+        else if (nk === 'reset') {
+          kind = 'reset';
+          active = nameActive(p.vname);
+        }
+      }
+      if (kind === 'clock') clocks.push(p.vname);
+      else if (kind === 'reset') resets.push({ vname: p.vname, active: active });
+      else data.push(p.vname);
+    });
+    return { clocks: clocks, resets: resets, data: data, depth: depth };
+  }
+
+  function assignLine(names, expr) {
+    if (names.length === 1) return names[0] + ' = ' + expr + ';';
+    return '{' + names.join(', ') + '} = ' + expr + ';';
+  }
+
+  /* Every combination, up to 12 signals. Wider ports still toggle the extras. */
+  function coverLoop(names, indent, note, ivar) {
+    var MAX = 12;
+    var lines = [];
+    var use = names;
+    var bound;
+    if (names.length > MAX) {
+      lines.push(indent + '// ' + names.length + ' signals; all combinations of the first ' + MAX + ', then each remaining signal is toggled');
+      use = names.slice(0, MAX);
+    } else if (note) lines.push(indent + note);
+    bound = 1 << use.length;
+    lines.push(indent + 'for (' + ivar + ' = 0; ' + ivar + ' < ' + bound + '; ' + ivar + ' = ' + ivar + ' + 1) begin');
+    lines.push(indent + '  ' + assignLine(use, ivar));
+    lines.push(indent + '  #10;');
+    lines.push(indent + 'end');
+    if (names.length > MAX) {
+      names.slice(MAX).forEach(function (nm) {
+        lines.push(indent + nm + ' = 1;');
+        lines.push(indent + '#10;');
+        lines.push(indent + nm + ' = 0;');
+        lines.push(indent + '#10;');
+      });
+    }
+    return lines;
+  }
+
+  /* Every input sequence of `depth` clocks. bits * depth stays at 8 or under,
+     which is 256 sequences. Deeper logic repeats each combination instead. */
+  function sequenceLoop(names, depth, indent, ivar) {
+    var bits = names.length;
+    var seqs = 1 << (bits * depth);
+    var lines = [];
+    var b, expr;
+    lines.push(indent + '// all ' + seqs + ' sequences of ' + names.join(', ') + ' across ' + depth + ' clocks');
+    lines.push(indent + 'for (' + ivar + ' = 0; ' + ivar + ' < ' + seqs + '; ' + ivar + ' = ' + ivar + ' + 1) begin');
+    for (b = 0; b < depth; b++) {
+      expr = b === 0 ? ivar : ('(' + ivar + ' >> ' + (b * bits) + ')');
+      lines.push(indent + '  ' + assignLine(names, expr));
+      lines.push(indent + '  #10;');
+    }
+    lines.push(indent + 'end');
+    return lines;
+  }
+
+  function loopName(ports) {
+    var used = { tb: 1, dut: 1 };
+    var name = 'i';
+    var n = 2;
+    ports.forEach(function (p) { used[p.vname] = 1; });
+    while (used[name]) { name = 'i' + n; n++; }
+    return name;
+  }
+
+  function stimulusLines(ports, info) {
+    var lines = [];
+    var useInt = false;
+    var resetBy = Object.create(null);
+    var dataSet = Object.create(null);
+    var sweep = [];
+    var data = [];
+    var clocked = info.clocks.length > 0;
+    var depth = info.depth || 0;
+    var ivar = loopName(ports);
+    var note, n, steps;
+    info.resets.forEach(function (r) { resetBy[r.vname] = r; });
+    info.data.forEach(function (nm) { dataSet[nm] = 1; });
+    ports.forEach(function (p) {
+      if (p.dir !== 'input') return;
+      if (dataSet[p.vname]) {
+        sweep.push(p.vname);
+        data.push(p.vname);
+      } else if (resetBy[p.vname]) sweep.push(p.vname);
+    });
+    if (!clocked) {
+      if (!sweep.length) lines.push('    #10;');
+      else {
+        n = 1 << Math.min(sweep.length, 12);
+        note = '// all ' + n + ' combinations of ' + sweep.join(', ');
+        lines = lines.concat(coverLoop(sweep, '    ', note, ivar));
+        useInt = true;
+      }
+      return { lines: lines, useInt: useInt, ivar: ivar };
+    }
+    lines.push(info.resets.length ? '    #12;' : '    #2;');
+    if (sweep.length) {
+      n = 1 << Math.min(sweep.length, 12);
+      note = '// all ' + n + ' combinations of ' + sweep.join(', ') + ', held for one clock';
+      lines = lines.concat(coverLoop(sweep, '    ', note, ivar));
+      useInt = true;
+    }
+    if (info.resets.length) {
+      info.resets.forEach(function (r) {
+        lines.push('    ' + r.vname + ' = ' + (r.active ? 0 : 1) + ';');
+      });
+      lines.push('    #10;');
+    }
+    if (data.length && depth >= 2) {
+      if (data.length * depth <= 8) lines = lines.concat(sequenceLoop(data, depth, '    ', ivar));
+      else {
+        lines.push('    // ' + depth + ' flip-flops; each data combination is applied for ' + depth + ' clocks');
+        lines.push('    repeat (' + depth + ') begin');
+        lines = lines.concat(coverLoop(data, '      ', '', ivar));
+        lines.push('    end');
+      }
+      useInt = true;
+    } else if (!data.length && depth > 0) {
+      steps = 1 << Math.min(depth, 12);
+      lines.push('    // ' + steps + ' clocks so ' + depth + ' flip-flop state can advance');
+      if (depth > 12) lines.push('    // stopped at 4096 clocks');
+      lines.push('    repeat (' + steps + ') #10;');
+    } else if (!sweep.length) lines.push('    repeat (4) #10;');
+    return { lines: lines, useInt: useInt, ivar: ivar };
+  }
+
+  /* A starting testbench for one module. Inputs become regs, outputs wires.
+     Combinational inputs are swept through every combination. Clocks free-run,
+     resets are asserted and released, and flip-flop chains see every short
+     input sequence so a value can travel the length of the chain. */
+  function tbTemplate(doc, moduleId) {
+    var rep = report(doc);
+    var lab = rep.labels && rep.labels[moduleId];
+    var mod = moduleById(doc, moduleId);
+    var ports, info, stim, lines, init;
+    if (!lab || !mod) return '';
+    ports = lab.portList || [];
+    info = classifyInputs(doc, mod, ports);
+    stim = stimulusLines(ports, info);
+    lines = ['`timescale 1ns/1ps', 'module tb;'];
+    init = Object.create(null);
+    info.resets.forEach(function (r) { init[r.vname] = r.active; });
+    ports.forEach(function (p) {
+      if (p.dir === 'input') {
+        lines.push('  reg ' + p.vname + ' = ' + (Object.prototype.hasOwnProperty.call(init, p.vname) ? init[p.vname] : 0) + ';');
+      } else lines.push('  wire ' + p.vname + ';');
+    });
+    lines.push('  ' + lab.vname + ' dut(' + ports.map(function (p) { return '.' + p.vname + '(' + p.vname + ')'; }).join(', ') + ');');
+    info.clocks.forEach(function (n) { lines.push('  always #5 ' + n + ' = ~' + n + ';'); });
+    if (stim.useInt) lines.push('  integer ' + stim.ivar + ';');
+    lines.push('  initial begin');
+    lines.push('    $dumpfile("dump.vcd");');
+    lines.push('    $dumpvars(0, tb);');
+    stim.lines.forEach(function (ln) { lines.push(ln); });
+    lines.push('    $finish;');
+    lines.push('  end');
+    lines.push('endmodule');
+    lines.push('');
+    return lines.join('\n');
+  }
+
   function externalStubs(src) {
     var note = STUB_NOTE.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
     var re = new RegExp(note + '[^\\n]*\\n\\s*module\\s+([A-Za-z_][A-Za-z0-9_$]*)', 'g');
@@ -1337,6 +1625,7 @@
     externalStubs: externalStubs,
     report: report,
     toVerilog: toVerilog,
+    tbTemplate: tbTemplate,
     ident: ident
   };
 });

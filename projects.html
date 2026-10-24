@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<!--
+  Project area. A project holds modules. The tree is the design hierarchy:
+  a module that instantiates other modules is a root, and each instance is a child.
+  Stored in this browser only.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projects · Verilog Schematic</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #e7edf4;
+    --bar: #ffffff;
+    --line: #d5dee8;
+    --line-strong: #c5d0dc;
+    --text: #152033;
+    --muted: #5c6b7e;
+    --faint: #8b97a8;
+    --accent: #1d6fe0;
+    --accent-soft: #e8f2fd;
+    --bad: #c53630;
+    --mono: Consolas, "Cascadia Mono", "Segoe UI Mono", ui-monospace, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+    --shadow: 0 8px 22px rgba(21, 32, 51, 0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  button, input { font-family: inherit; }
+  button { cursor: pointer; }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: var(--bar);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand { display: flex; flex-direction: column; gap: 1px; }
+  .brand b { font-size: 15px; letter-spacing: -0.01em; }
+  .brand small { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  a.open-editor, button.primary, button.quiet, button.danger {
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-weight: 650;
+    text-decoration: none;
+  }
+  a.open-editor, button.quiet {
+    background: #fff;
+    color: var(--accent);
+    border: 1px solid #b7d3f6;
+  }
+  a.open-editor:hover, button.quiet:hover { background: var(--accent-soft); }
+  button.primary { background: var(--accent); color: #fff; border: 1px solid var(--accent); }
+  button.primary:hover { filter: brightness(1.06); }
+  button.danger { background: #fff; color: var(--bad); border: 1px solid #f0c4c1; }
+  button.danger:hover { background: #fdeceb; }
+  .layout { flex: 1; min-height: 0; display: flex; }
+  aside {
+    width: 280px;
+    flex: none;
+    background: #fbfcfe;
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .aside-h, .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+  }
+  .aside-h b { font-size: 13px; }
+  #projectList { overflow: auto; padding: 8px; }
+  .prow {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: 10px;
+    padding: 8px 10px;
+    color: var(--text);
+  }
+  .prow strong { font-size: 13.5px; font-weight: 650; }
+  .prow span { color: var(--faint); font-size: 11.5px; font-family: var(--mono); }
+  .prow.on { background: var(--accent-soft); border-color: #c5ddf8; }
+  .prow:hover { background: #f0f4f8; }
+  .prow.on:hover { background: var(--accent-soft); }
+  main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .toolbar { flex-wrap: wrap; gap: 8px; }
+  .toolbar h1 { margin: 0; font-size: 18px; font-weight: 680; letter-spacing: -0.02em; }
+  #search {
+    width: min(240px, 40vw);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+  }
+  #search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .lead {
+    margin: 0;
+    padding: 10px 14px 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  #msg { min-height: 18px; padding: 4px 14px 0; color: var(--bad); font-size: 12.5px; }
+  #tree {
+    list-style: none;
+    margin: 0;
+    padding: 12px 14px 28px;
+    overflow: auto;
+    flex: 1;
+  }
+  .node { list-style: none; }
+  .card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px 10px;
+    margin: 0 0 8px;
+    box-shadow: var(--shadow);
+  }
+  .twist, .twist-spacer {
+    width: 26px;
+    height: 26px;
+    flex: none;
+    border: none;
+    background: transparent;
+    border-radius: 6px;
+    color: var(--muted);
+  }
+  .twist { cursor: pointer; }
+  .twist:hover { background: #f0f4f8; }
+  .twist.open { transform: rotate(90deg); }
+  .symbol {
+    width: 36px;
+    height: 28px;
+    flex: none;
+    border-radius: 7px;
+    background: #f4f7fb;
+    border: 1px solid var(--line);
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .body { flex: 1; min-width: 0; }
+  .name {
+    border: none;
+    background: transparent;
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 650;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .name:hover { text-decoration: underline; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: #fff6e6;
+    color: #8a5a00;
+    font-size: 11px;
+    font-weight: 650;
+  }
+  .acts { display: flex; gap: 4px; flex: none; }
+  .acts button {
+    border: 1px solid var(--line);
+    background: #fff;
+    border-radius: 7px;
+    padding: 4px 8px;
+    font-size: 12px;
+    color: var(--text);
+  }
+  .acts button:hover { border-color: var(--accent); color: var(--accent); }
+  .kids { list-style: none; margin: 0 0 8px 22px; padding: 0 0 0 12px; border-left: 1px solid var(--line-strong); }
+  .empty {
+    margin: 24px 14px;
+    padding: 22px;
+    background: #fff;
+    border: 1px dashed var(--line-strong);
+    border-radius: 12px;
+    color: var(--muted);
+  }
+  .modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 22, 30, 0.46);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 5;
+    padding: 20px;
+  }
+  .modal[hidden] { display: none; }
+  .sheet {
+    width: min(420px, 100%);
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(16, 22, 30, 0.28);
+    padding: 16px;
+  }
+  .sheet h2 { margin: 0 0 8px; font-size: 16px; }
+  .sheet p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .sheet input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: var(--mono);
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+  .sheet .row { display: flex; justify-content: flex-end; gap: 8px; }
+  @media (max-width: 760px) {
+    .layout { flex-direction: column; }
+    aside { width: auto; max-height: 34%; border-right: none; border-bottom: 1px solid var(--line); }
+    .card { flex-wrap: wrap; }
+    .acts { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <b>Verilog Schematic</b>
+    <small>Projects and the module hierarchy</small>
+  </div>
+  <div class="spacer"></div>
+  <a class="open-editor" id="openEditor" href="designer.html">Open editor</a>
+</header>
+<div class="layout">
+  <aside>
+    <div class="aside-h">
+      <b>Projects</b>
+      <div class="spacer"></div>
+      <button class="primary" id="newProject" type="button">New</button>
+    </div>
+    <div id="projectList"></div>
+  </aside>
+  <main>
+    <div class="toolbar">
+      <h1 id="projectTitle">Project</h1>
+      <input id="search" type="search" placeholder="Find a module" autocomplete="off">
+      <div class="spacer"></div>
+      <button class="primary" id="newModule" type="button">New module</button>
+      <button class="quiet" id="renProject" type="button">Rename</button>
+      <button class="quiet" id="dupProject" type="button">Duplicate</button>
+      <button class="quiet" id="expProject" type="button">Export</button>
+      <button class="quiet" id="impProject" type="button">Import</button>
+      <button class="danger" id="delProject" type="button">Delete</button>
+    </div>
+    <p class="lead">Each module is one drawing. A module that places another module is higher in the tree. Open a module to edit its schematic, icon, Verilog, testbench, and VCD.</p>
+    <div id="msg"></div>
+    <ul id="tree"></ul>
+  </main>
+</div>
+<div class="modal" id="modal" hidden>
+  <form class="sheet" id="nameForm">
+    <h2 id="modalTitle">Rename</h2>
+    <p id="modalText"></p>
+    <input id="modalInput" spellcheck="false" autocomplete="off">
+    <div class="row">
+      <button type="button" class="quiet" id="modalCancel">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</div>
+<input id="file" type="file" accept=".json,application/json" hidden>
+<script src="design.js"></script>
+<script src="workspace.js"></script>
+<script src="projects.js"></script>
+</body>
+</html>

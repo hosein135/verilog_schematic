@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <!--
-  Schematic designer. Draw gates, muxes, and flip-flops, then export Verilog
-  that verilog.html can draw again. Open this file directly; no server required.
+  Schematic designer. Draw a module, edit its Verilog and testbench, and generate a VCD.
+  Open this file directly; no server required.
+  Simulation uses Icarus Verilog (GPL-2.0-or-later) via engine.js / vendor/.
 -->
 <html lang="en">
 <head>
@@ -149,6 +150,119 @@
     padding: 7px 12px;
   }
   button.ghost:hover:not(:disabled) { background: var(--accent-soft); }
+  a.ghost {
+    display: inline-block;
+    text-decoration: none;
+    background: #fff;
+    color: var(--accent);
+    border: 1px solid #b7d3f6;
+    font-weight: 650;
+    padding: 7px 12px;
+    border-radius: 8px;
+    font-size: 12.5px;
+  }
+  a.ghost:hover { background: var(--accent-soft); }
+  .work { flex: 1; min-width: 0; min-height: 0; display: flex; }
+  .design-row { flex: 1; min-width: 0; min-height: 0; display: flex; }
+  .design-row[hidden] { display: none; }
+  .aspect-pane {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+  }
+  .aspect-pane[hidden] { display: none; }
+  #aspectHost { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+  #aspectHost textarea.editor-full {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    resize: none;
+    outline: none;
+    margin: 0;
+    padding: 12px 14px 20px;
+    background: #fbfcfe;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    tab-size: 2;
+  }
+  .icon-stage { flex: 1; display: grid; place-items: center; background: #f5f8fb; min-height: 240px; }
+  .syncbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: #fff;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  #syncActions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .syncnote { color: var(--muted); font-size: 12.5px; }
+  .vcd-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+    background: #fff;
+  }
+  .vcd-tools button.mode.on {
+    background: var(--accent-soft);
+    border-color: #c5ddf8;
+    font-weight: 650;
+  }
+  .vcd-log, .vcd-text {
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre;
+    background: #fbfcfe;
+  }
+  .vcd-log { color: var(--muted); max-height: 28%; border-bottom: 1px solid var(--line); }
+  .vcd-text { flex: 1; min-height: 0; }
+  .vcd-wave { flex: 1; min-height: 0; display: flex; }
+  .vcd-sigs {
+    width: 220px;
+    flex: none;
+    overflow: auto;
+    border-right: 1px solid var(--line);
+    background: #fafbfc;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .vcd-sighead {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 10px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    background: #fafbfc;
+  }
+  .vcd-sighead button {
+    border: none;
+    background: transparent;
+    color: var(--accent);
+    padding: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .vcd-sigs label { display: flex; gap: 7px; align-items: center; padding: 3px 10px; cursor: pointer; }
+  .vcd-sigs label:hover { background: #f0f4f8; }
+  .vcd-plot { flex: 1; min-width: 0; overflow: auto; position: relative; }
+  .vcd-empty { color: var(--muted); font-family: var(--mono); font-size: 13px; padding: 14px; }
+  .vcd-meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
   .tabs {
     display: flex;
     align-items: center;
@@ -262,7 +376,7 @@
     touch-action: none;
     cursor: default;
   }
-  #canvas.place, #canvas.wire { cursor: crosshair; }
+  #canvas.place, #canvas.wire, #canvas.area { cursor: crosshair; }
   #canvas.pan { cursor: grab; }
   #canvas.pan:active { cursor: grabbing; }
   .hud {
@@ -276,7 +390,7 @@
   }
   .hud.top { top: 12px; }
   .hud.top:empty, .hud.top:has(#hint[hidden]) { display: none; }
-  .hud.bottom { bottom: 12px; justify-content: space-between; }
+  .hud.bottom { bottom: 12px; justify-content: flex-end; }
   .chip {
     pointer-events: none;
     max-width: min(560px, 70%);
@@ -537,7 +651,8 @@
     }
     .pal .pg, .pal .help { display: none; }
     .pi, .select-tool { width: auto; flex: none; white-space: nowrap; box-shadow: none; }
-    .app { flex-direction: column; }
+    .app, .design-row { flex-direction: column; }
+    .work { min-height: 0; }
     .stage { min-height: 0; flex: 1.4; }
     .side {
       width: auto;
@@ -552,42 +667,27 @@
     .chip { max-width: calc(100% - 168px); }
   }
 </style>
+<link rel="stylesheet" href="explorer.css">
 </head>
 <body>
-<header>
-  <div class="brand">
-    <span class="mark" aria-hidden="true">
-      <svg viewBox="0 0 32 32" width="32" height="32">
-        <path d="M7 10h8.2a5.2 5.2 0 0 1 0 10.4H7z" fill="none" stroke="#fff" stroke-width="1.7"/>
-        <circle cx="23.2" cy="15.2" r="1.7" fill="#fff"/>
-      </svg>
-    </span>
-    <span>
-      <b>Schematic Designer</b>
-      <small>Draw a circuit, export Verilog</small>
-    </span>
-  </div>
-  <label class="modname">Module <input id="modname" spellcheck="false" autocomplete="off"></label>
-  <select id="examples" class="ex" title="Load an example"></select>
-  <div class="grp" role="group" aria-label="Edit">
-    <button id="undo" type="button" title="Undo (Ctrl+Z)">Undo</button>
-    <button id="redo" type="button" title="Redo (Ctrl+Y)">Redo</button>
-    <span class="gdiv"></span>
-    <button id="del" type="button" title="Delete selection (Delete)">Delete</button>
-  </div>
-  <div class="actions">
-    <div class="grp" role="group" aria-label="File">
-      <button id="imp" type="button" title="Paste Verilog or open a drawing">Import</button>
-      <button id="save" type="button" title="Save the drawing (Ctrl+S)">Save</button>
-    </div>
-    <button id="exp" type="button" title="Download the generated Verilog">Export .v</button>
-    <button id="tex" type="button" title="Convert the drawing to CircuiTikZ (LaTeX) and back">CircuiTikZ</button>
-    <button id="openSim" type="button" class="ghost" title="Open this Verilog in the simulator">Simulate</button>
-    <button id="preview" type="button" class="primary" title="Draw this Verilog with the schematic viewer">Preview</button>
-  </div>
-</header>
 <div class="tabs" id="tabs"></div>
+<div class="syncbar">
+  <a class="ghost" href="projects.html">Projects</a>
+  <label class="modname">Module <input id="modname" spellcheck="false" autocomplete="off"></label>
+  <span class="spacer"></span>
+  <div id="syncActions"></div>
+</div>
 <div class="app">
+  <aside class="explorer" id="explorer">
+    <div class="ex-top">
+      <a id="exProject" href="projects.html">Project</a>
+      <button id="exCollapse" type="button" title="Collapse the design files">‹</button>
+    </div>
+    <div id="exbody"></div>
+    <div id="exHier"></div>
+  </aside>
+  <div class="work">
+  <div class="design-row" id="aspectSchematic">
   <aside class="pal" id="pal"></aside>
   <div class="stage">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg">
@@ -598,7 +698,6 @@
       <span id="hint" class="chip" hidden></span>
     </div>
     <div class="hud bottom">
-      <span id="badge" class="chip badge"></span>
       <div class="zoomctl">
         <button id="zout" type="button" title="Zoom out">−</button>
         <button id="zoom" type="button" class="zlab" title="Reset zoom">100%</button>
@@ -608,19 +707,21 @@
     </div>
   </div>
   <aside class="side">
-    <div class="sidehead">Properties</div>
+    <div class="sidehead">Selection</div>
     <section id="inspector"></section>
     <section id="issues" hidden></section>
-    <section class="code">
-      <div class="codebar">
-        <span class="code-title">Verilog</span>
-        <span id="codestat" class="codestat"></span>
-        <span class="spacer"></span>
-        <button id="copy" type="button" class="mini">Copy</button>
-      </div>
-      <textarea id="verilog" readonly spellcheck="false"></textarea>
-    </section>
   </aside>
+  </div>
+  <section class="aspect-pane" id="aspectOther" hidden>
+    <div class="codebar" id="aspectBar">
+      <span class="code-title" id="aspectTitle">File</span>
+      <span id="aspectStat" class="codestat"></span>
+      <span class="spacer"></span>
+      <span id="aspectExtra"></span>
+    </div>
+    <div id="aspectHost"></div>
+  </section>
+  </div>
 </div>
 <div id="toast"></div>
 <div id="modal" class="modal" hidden>
@@ -658,7 +759,10 @@
 <input id="file" type="file" accept=".json,.v,.sv,.vh,.txt,.tex,.tikz,.pgf,application/json,text/plain" hidden>
 <script src="schematic.js"></script>
 <script src="design.js"></script>
+<script src="workspace.js"></script>
+<script src="explorer.js"></script>
 <script src="circuitikz.js"></script>
+<script src="sim.js"></script>
 <script src="designer.js"></script>
 </body>
 </html>

@@ -22,8 +22,27 @@
     view: { x: 40, y: 32, z: 1 },
     sel: null,
     tool: '',
+    toolRef: '',
+    projectId: '',
+    aspect: 'schematic',
+    verilogText: null,
+    vcd: {
+      mode: 'text',
+      text: '',
+      log: '',
+      model: null,
+      selOrder: [],
+      view0: 0,
+      viewSpan: null,
+      curT: null,
+      running: false,
+      drag: null,
+      geom: null,
+      plot: null
+    },
     wiring: null,
     drag: null,
+    marquee: null,
     pan: null,
     gesture: null,
     cursor: null,
@@ -68,6 +87,11 @@
     return node;
   }
 
+  function disable(id, value) {
+    var node = $(id);
+    if (node) node.disabled = value;
+  }
+
   function active() {
     return Design.moduleById(state.doc, state.doc.active) || state.doc.modules[0];
   }
@@ -98,6 +122,58 @@
 
   function snap(v) { return Math.round(v / 8) * 8; }
 
+  function selectionList() {
+    if (!state.sel) return [];
+    if (state.sel.kind === 'many') return state.sel.items || [];
+    return [state.sel];
+  }
+
+  function selectedPartIds() {
+    var ids = [];
+    selectionList().forEach(function (s) {
+      if (s.kind === 'part') ids.push(s.id);
+    });
+    return ids;
+  }
+
+  function isSel(kind, id) {
+    var list = selectionList();
+    var i;
+    for (i = 0; i < list.length; i++) if (list[i].kind === kind && list[i].id === id) return true;
+    return false;
+  }
+
+  function setSelection(items) {
+    var clean = [];
+    var seen = Object.create(null);
+    (items || []).forEach(function (s) {
+      var key;
+      if (!s || (s.kind !== 'part' && s.kind !== 'net')) return;
+      key = s.kind + ':' + s.id;
+      if (seen[key]) return;
+      if (s.kind === 'part' && !partById(s.id)) return;
+      if (s.kind === 'net' && !netById(s.id)) return;
+      seen[key] = 1;
+      clean.push({ kind: s.kind, id: s.id });
+    });
+    if (!clean.length) state.sel = null;
+    else if (clean.length === 1) state.sel = clean[0];
+    else state.sel = { kind: 'many', items: clean };
+  }
+
+  function partsInRect(box) {
+    var x0 = Math.min(box.x0, box.x1);
+    var y0 = Math.min(box.y0, box.y1);
+    var x1 = Math.max(box.x0, box.x1);
+    var y1 = Math.max(box.y0, box.y1);
+    var ids = [];
+    active().parts.forEach(function (part) {
+      var m = Design.metrics(part, state.doc);
+      if (part.x < x1 && part.x + m.w > x0 && part.y < y1 && part.y + m.h > y0) ids.push(part.id);
+    });
+    return ids;
+  }
+
   function toolLabel(type) {
     var g, i;
     for (g = 0; g < PALETTE.length; g++) {
@@ -113,21 +189,27 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
   }
 
-  function toast(msg) {
+  function toast(msg, ms) {
     var node = $('#toast');
     node.textContent = msg;
     node.classList.add('on');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { node.classList.remove('on'); }, 1700);
+    toastTimer = setTimeout(function () { node.classList.remove('on'); }, ms || 1700);
+  }
+
+  function saveNow() {
+    if (state.projectId && window.Workspace) {
+      Workspace.saveDrawing(state.projectId, state.doc, state.view);
+      return;
+    }
+    try {
+      localStorage.setItem(STORE, JSON.stringify({ doc: state.doc, view: state.view }));
+    } catch (err) { /* private mode */ }
   }
 
   function saveSoon() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(function () {
-      try {
-        localStorage.setItem(STORE, JSON.stringify({ doc: state.doc, view: state.view }));
-      } catch (err) { /* private mode */ }
-    }, 180);
+    saveTimer = setTimeout(saveNow, 180);
   }
 
   function pushUndo() {
@@ -139,8 +221,7 @@
 
   function rememberSelection() {
     if (!state.sel) return;
-    if (state.sel.kind === 'part' && !partById(state.sel.id)) state.sel = null;
-    if (state.sel.kind === 'net' && !netById(state.sel.id)) state.sel = null;
+    setSelection(selectionList());
   }
 
   function viewerOf(verilog) {
@@ -157,17 +238,23 @@
     }
     rememberSelection();
     state.report = Design.report(state.doc);
+    if (state.verilogText == null) loadVerilogBuffer();
+    seedTestbenches();
     state.viewer = viewerOf(state.report.verilog);
     renderCanvas();
     renderCode();
     renderIssues();
     renderStatus();
     renderTabs();
+    renderProjectModules();
+    renderExplorer();
+    renderAspectPane();
     if (opts.inspector !== false) renderInspector();
-    if (document.activeElement !== $('#modname')) $('#modname').value = active().name || '';
-    $('#undo').disabled = !state.past.length;
-    $('#redo').disabled = !state.future.length;
-    $('#del').disabled = !state.sel;
+    if ($('#modname') && document.activeElement !== $('#modname')) $('#modname').value = active().name || '';
+    disable('undo', !state.past.length);
+    disable('redo', !state.future.length);
+    disable('del', !state.sel);
+    renderSync();
     saveSoon();
   }
 
@@ -226,9 +313,13 @@
         b.appendChild(document.createTextNode(item[1]));
       });
     });
+    el('div', { class: 'pg', id: 'modpalLabel', text: 'In this project' }, host);
+    el('div', { id: 'modpal' }, host);
     var help = el('div', { class: 'help' }, host);
     el('p', { text: 'Click a tool, then the sheet. Drag a tool on to place it once. Shift keeps the tool armed.' }, help);
+    el('p', { text: 'Modules already in this project are listed under In this project. Double-click a module on the sheet to open it.' }, help);
     el('p', { text: 'Click a pin, then another pin, to wire them. Alt-click a pin to disconnect it.' }, help);
+    el('p', { text: 'Drag across the sheet to select every part in the box. Shift adds to the selection. Shift-click adds or removes one part. Ctrl+A selects every part.' }, help);
     var keys = el('p', {}, help);
     el('kbd', { text: 'Del' }, keys);
     keys.appendChild(document.createTextNode(' remove · '));
@@ -238,6 +329,7 @@
     keys.appendChild(document.createTextNode(' select · '));
     el('kbd', { text: 'Space' }, keys);
     keys.appendChild(document.createTextNode(' pan'));
+    el('p', { text: 'Ctrl+Z undoes. Ctrl+Y or Ctrl+Shift+Z redoes.' }, help);
   }
 
   function syncPalette() {
@@ -245,13 +337,15 @@
     var i;
     for (i = 0; i < nodes.length; i++) {
       if (!nodes[i].hasAttribute('data-type')) continue;
-      nodes[i].classList.toggle('on', nodes[i].getAttribute('data-type') === state.tool);
+      var ref = nodes[i].getAttribute('data-ref') || '';
+      nodes[i].classList.toggle('on', nodes[i].getAttribute('data-type') === state.tool && ref === (state.toolRef || ''));
     }
     $('#canvas').classList.toggle('place', !!state.tool);
   }
 
   function fillExamples() {
     var sel = $('#examples');
+    if (!sel) return;
     el('option', { value: '', text: 'Examples' }, sel);
     Design.EXAMPLES.forEach(function (pair) {
       el('option', { value: pair[0], text: pair[1] }, sel);
@@ -657,7 +751,7 @@
         d += 'M ' + s[0].toFixed(1) + ' ' + s[1].toFixed(1) + ' L ' + s[2].toFixed(1) + ' ' + s[3].toFixed(1) + ' ';
       });
       if (!d) return;
-      var on = state.sel && state.sel.kind === 'net' && state.sel.id === net.id;
+      var on = isSel('net', net.id);
       var hot = state.hover && state.hover.net === net.id;
       svgEl('path', { d: d, fill: 'none', stroke: 'transparent', 'stroke-width': 12, 'data-net': net.id }, world);
       svgEl('path', {
@@ -701,7 +795,7 @@
       var m = Design.metrics(part, state.doc);
       var g = svgEl('g', { transform: 'translate(' + part.x + ' ' + part.y + ')' }, world);
       drawSymbol(g, part, m);
-      var selected = state.sel && state.sel.kind === 'part' && state.sel.id === part.id;
+      var selected = isSel('part', part.id);
       if (selected) {
         svgEl('rect', {
           x: -6, y: -6, width: m.w + 12, height: m.h + 12, rx: 7,
@@ -713,7 +807,7 @@
         var net = netContaining(part.id, p.name);
         var open = !net;
         var mark = (state.wiring && state.wiring.part === part.id && state.wiring.pin === p.name) ||
-          (state.sel && state.sel.kind === 'net' && net && state.sel.id === net.id);
+          (net && isSel('net', net.id));
         svgEl('circle', {
           cx: p.x, cy: p.y, r: 8, fill: 'transparent',
           'data-pin': p.name, 'data-part': part.id
@@ -734,7 +828,7 @@
         var ghost = {
           type: kind, name: kind === 'in' ? 'a' : kind === 'out' ? 'y' : 'u',
           x: 0, y: 0, inputs: 2, hasRst: false, clkEdge: 'pos', rstEdge: 'pos', rstVal: 0,
-          ref: '', ext: 'block', ports: [{ name: 'a', dir: 'input' }, { name: 'y', dir: 'output' }]
+          ref: state.toolRef || '', ext: 'block', ports: [{ name: 'a', dir: 'input' }, { name: 'y', dir: 'output' }]
         };
         var gm = Design.metrics(ghost, state.doc);
         var gx = snap(state.cursor.x - gm.w / 2);
@@ -743,11 +837,24 @@
         drawSymbol(gg, ghost, gm);
       }
     }
+
+    if (state.marquee && state.marquee.moved) {
+      var mx = Math.min(state.marquee.x0, state.marquee.x1);
+      var my = Math.min(state.marquee.y0, state.marquee.y1);
+      var mw = Math.abs(state.marquee.x1 - state.marquee.x0);
+      var mh = Math.abs(state.marquee.y1 - state.marquee.y0);
+      svgEl('rect', {
+        x: mx, y: my, width: Math.max(mw, 0.5), height: Math.max(mh, 0.5),
+        fill: 'rgba(29,111,224,0.14)', stroke: '#1d6fe0', 'stroke-width': 1.25,
+        'stroke-dasharray': '5 3', 'vector-effect': 'non-scaling-stroke', 'pointer-events': 'none'
+      }, world);
+    }
   }
 
   function renderCode() {
     var text = (state.report && state.report.verilog) || '';
-    $('#verilog').value = text;
+    var box = $('#verilog');
+    if (box) box.value = text;
     var stat = $('#codestat');
     if (!stat) return;
     var lines = text ? text.replace(/\n$/, '').split('\n').length : 0;
@@ -794,16 +901,18 @@
     var errors = issues.filter(function (i) { return i.level === 'error'; }).length;
     var warns = issues.length - errors;
     var badge = $('#badge');
-    badge.className = 'chip badge';
-    if (!state.viewer || !state.viewer.ok) {
-      badge.classList.add('bad');
-      badge.textContent = 'Viewer rejected it';
-    } else if (errors || warns) {
-      badge.classList.add('warn');
-      badge.textContent = 'Draws, with ' + issues.length + (issues.length === 1 ? ' note' : ' notes');
-    } else {
-      badge.classList.add('ok');
-      badge.textContent = 'Viewer can draw this';
+    if (badge) {
+      badge.className = 'chip badge';
+      if (!state.viewer || !state.viewer.ok) {
+        badge.classList.add('bad');
+        badge.textContent = 'Viewer rejected it';
+      } else if (errors || warns) {
+        badge.classList.add('warn');
+        badge.textContent = 'Draws, with ' + issues.length + (issues.length === 1 ? ' note' : ' notes');
+      } else {
+        badge.classList.add('ok');
+        badge.textContent = 'Viewer can draw this';
+      }
     }
     var hint = $('#hint');
     if (state.wiring) {
@@ -812,11 +921,15 @@
     } else if (state.tool) {
       hint.hidden = false;
       hint.textContent = 'Click to place ' + toolLabel(state.tool) + '. Shift keeps the tool.';
+    } else if (state.marquee) {
+      hint.hidden = false;
+      hint.textContent = state.marquee.add ? 'Release to add these parts to the selection.' : 'Release to select the parts inside the box.';
     } else {
       hint.hidden = true;
       hint.textContent = '';
     }
     $('#canvas').classList.toggle('wire', !!state.wiring);
+    $('#canvas').classList.toggle('area', !!state.marquee);
     $('#zoom').textContent = Math.round(state.view.z * 100) + '%';
   }
 
@@ -878,15 +991,17 @@
       renderIssues();
       renderStatus();
       renderTabs();
-      if (document.activeElement !== $('#modname')) $('#modname').value = active().name || '';
+      renderExplorer();
+      if ($('#modname') && document.activeElement !== $('#modname')) $('#modname').value = active().name || '';
+      if (state.aspect === 'icon') renderAspectPane();
       saveSoon();
     });
     input.addEventListener('blur', function (e) {
       commitIfChanged(before);
       before = null;
-      $('#undo').disabled = !state.past.length;
+      disable('undo', !state.past.length);
       var next = e.relatedTarget;
-      if (next && $('#inspector').contains(next)) return;
+      if (next && (($('#inspector') && $('#inspector').contains(next)) || ($('#aspectHost') && $('#aspectHost').contains(next)))) return;
       onDocChange();
     });
     input.value = read();
@@ -902,7 +1017,7 @@
       el('h2', { text: mod.name || 'Module' }, host);
       el('p', {
         class: 'note',
-        text: 'The drawing exports structural Verilog as you edit it. Preview checks that the schematic viewer can read it back.'
+        text: 'Draw the module here. Update Verilog copies this drawing into the Verilog editor. Apply from Verilog replaces the drawing with that editor.'
       }, host);
       var ports = mod.parts.filter(function (p) { return p.type === 'in' || p.type === 'out'; });
       if (!ports.length) el('p', { class: 'note', text: 'Add inputs and outputs from the palette. They become the module ports.' }, host);
@@ -918,6 +1033,25 @@
         var del = el('button', { type: 'button', text: 'Delete this module' }, host);
         del.addEventListener('click', function () { deleteModule(mod.id); });
       }
+      return;
+    }
+    if (state.sel.kind === 'many') {
+      var pickedParts = selectionList().filter(function (s) { return s.kind === 'part'; });
+      var pickedNets = selectionList().length - pickedParts.length;
+      var pickedTitle = pickedParts.length + (pickedParts.length === 1 ? ' part' : ' parts');
+      if (pickedNets) pickedTitle += ', ' + pickedNets + (pickedNets === 1 ? ' net' : ' nets');
+      el('h2', { text: pickedTitle }, host);
+      el('p', { class: 'note', text: 'Drag any selected part to move the group. Delete removes the whole selection.' }, host);
+      var names = el('div', { class: 'pins' }, host);
+      pickedParts.slice(0, 12).forEach(function (s) {
+        var one = partById(s.id);
+        if (!one) return;
+        var row = el('div', { class: 'pinrow' }, names);
+        el('span', { text: (one.name || one.type) + ' · ' + toolLabel(one.type) }, row);
+      });
+      if (pickedParts.length > 12) el('p', { class: 'note', text: (pickedParts.length - 12) + ' more' }, host);
+      var drop = el('button', { type: 'button', text: 'Delete selection' }, host);
+      drop.addEventListener('click', deleteSelection);
       return;
     }
     if (state.sel.kind === 'net') {
@@ -1172,44 +1306,66 @@
   function placeAt(w, keep) {
     var mod = active();
     var probe = {
-      type: state.tool, name: 'uu', inputs: 2, hasRst: false, ref: '', ext: 'block',
+      type: state.tool, name: 'uu', inputs: 2, hasRst: false, ref: state.toolRef || '', ext: 'block',
       ports: [{ name: 'a', dir: 'input' }, { name: 'y', dir: 'output' }]
     };
     var m = Design.metrics(probe, state.doc);
     pushUndo();
     var part = Design.freshPart(state.doc, mod.id, state.tool, snap(w.x - m.w / 2), snap(w.y - m.h / 2));
+    if (state.toolRef) {
+      part.ref = state.toolRef;
+      part.ext = '';
+      part.ports = [];
+    }
     mod.parts.push(part);
     state.sel = { kind: 'part', id: part.id };
-    if (!keep) state.tool = '';
+    if (!keep) {
+      state.tool = '';
+      state.toolRef = '';
+    }
     state.wiring = null;
     syncPalette();
     onDocChange();
   }
 
   function deleteSelection() {
-    if (!state.sel) return;
+    var items = selectionList();
+    if (!items.length) return;
     var mod = active();
+    var parts = Object.create(null);
+    var nets = Object.create(null);
+    items.forEach(function (s) {
+      if (s.kind === 'part') parts[s.id] = 1;
+      else nets[s.id] = 1;
+    });
     pushUndo();
-    if (state.sel.kind === 'part') mod.parts = mod.parts.filter(function (p) { return p.id !== state.sel.id; });
-    else mod.nets = mod.nets.filter(function (n) { return n.id !== state.sel.id; });
+    mod.parts = mod.parts.filter(function (p) { return !parts[p.id]; });
+    mod.nets = mod.nets.filter(function (n) { return !nets[n.id]; });
     state.sel = null;
+    state.marquee = null;
     Design.prune(state.doc);
     onDocChange();
   }
 
   function duplicate() {
-    if (!state.sel || state.sel.kind !== 'part') return;
-    var part = partById(state.sel.id);
-    if (!part) return;
+    var ids = selectedPartIds();
+    if (!ids.length) return;
     var mod = active();
-    var copy = Design.clone(part);
+    var copies = [];
     pushUndo();
-    copy.id = Design.uid(state.doc, 'p');
-    copy.x = snap(part.x + 24);
-    copy.y = snap(part.y + 24);
-    copy.name = Design.autoName(mod, part.type);
-    mod.parts.push(copy);
-    state.sel = { kind: 'part', id: copy.id };
+    ids.forEach(function (id) {
+      var part = partById(id);
+      var copy;
+      if (!part) return;
+      copy = Design.clone(part);
+      copy.id = Design.uid(state.doc, 'p');
+      copy.x = snap(part.x + 24);
+      copy.y = snap(part.y + 24);
+      copy.name = Design.autoName(mod, part.type);
+      mod.parts.push(copy);
+      copies.push({ kind: 'part', id: copy.id });
+    });
+    setSelection(copies);
     onDocChange();
   }
 
@@ -1397,21 +1553,62 @@
     }
     if (partEl) {
       var id = partEl.getAttribute('data-part');
-      state.sel = { kind: 'part', id: id };
+      var items, idx, i, ids, keepGroup, origins;
       state.wiring = null;
       if (state.tool) { state.tool = ''; syncPalette(); }
-      var part = partById(id);
-      state.drag = { id: id, ox: part.x, oy: part.y, wx: w.x, wy: w.y, changed: false, undo: false };
+      if (e.shiftKey) {
+        items = selectionList().map(function (s) { return { kind: s.kind, id: s.id }; });
+        idx = -1;
+        for (i = 0; i < items.length; i++) if (items[i].kind === 'part' && items[i].id === id) idx = i;
+        if (idx >= 0) items.splice(idx, 1);
+        else items.push({ kind: 'part', id: id });
+        setSelection(items);
+        onDocChange();
+        return;
+      }
+      keepGroup = isSel('part', id) && selectedPartIds().length > 1;
+      if (keepGroup) ids = selectedPartIds();
+      else {
+        setSelection([{ kind: 'part', id: id }]);
+        ids = [id];
+      }
+      origins = {};
+      ids.forEach(function (pid) {
+        var p = partById(pid);
+        if (p) origins[pid] = { x: p.x, y: p.y };
+      });
+      state.drag = { ids: ids, origins: origins, wx: w.x, wy: w.y, undo: false, narrow: keepGroup ? id : '' };
       try { $('#canvas').setPointerCapture(e.pointerId); } catch (err) { /* already released */ }
+      renderCanvas();
       return;
     }
     if (netEl && !state.tool) {
-      state.sel = { kind: 'net', id: netEl.getAttribute('data-net') };
+      var nid = netEl.getAttribute('data-net');
+      if (e.shiftKey) {
+        var kept = selectionList().map(function (s) { return { kind: s.kind, id: s.id }; });
+        var at = -1;
+        var k;
+        for (k = 0; k < kept.length; k++) if (kept[k].kind === 'net' && kept[k].id === nid) at = k;
+        if (at >= 0) kept.splice(at, 1);
+        else kept.push({ kind: 'net', id: nid });
+        setSelection(kept);
+      } else setSelection([{ kind: 'net', id: nid }]);
       state.wiring = null;
       onDocChange();
       return;
     }
-    startPan(e, true);
+    if (!state.tool) {
+      state.marquee = {
+        x0: w.x, y0: w.y, x1: w.x, y1: w.y,
+        sx: e.clientX, sy: e.clientY,
+        moved: false,
+        add: !!e.shiftKey,
+        base: e.shiftKey ? selectionList().map(function (s) { return { kind: s.kind, id: s.id }; }) : []
+      };
+      try { $('#canvas').setPointerCapture(e.pointerId); } catch (err2) { /* already released */ }
+      renderStatus();
+      return;
+    }
   }
 
   function startPan(e, deselect) {
@@ -1429,20 +1626,43 @@
     var w = worldFromEvent(e);
     state.cursor = w;
     if (state.drag) {
-      var part = partById(state.drag.id);
-      if (!part) return;
-      var nx = snap(state.drag.ox + w.x - state.drag.wx);
-      var ny = snap(state.drag.oy + w.y - state.drag.wy);
-      if (nx !== part.x || ny !== part.y) {
+      var dx = w.x - state.drag.wx;
+      var dy = w.y - state.drag.wy;
+      var next = [];
+      var changed = false;
+      state.drag.ids.forEach(function (id) {
+        var part = partById(id);
+        var origin = state.drag.origins[id];
+        var nx, ny;
+        if (!part || !origin) return;
+        if (state.drag.ids.length > 1) {
+          nx = origin.x + snap(dx);
+          ny = origin.y + snap(dy);
+        } else {
+          nx = snap(origin.x + dx);
+          ny = snap(origin.y + dy);
+        }
+        if (nx !== part.x || ny !== part.y) changed = true;
+        next.push({ part: part, x: nx, y: ny });
+      });
+      if (changed) {
         if (!state.drag.undo) {
           pushUndo();
           state.drag.undo = true;
         }
-        part.x = nx;
-        part.y = ny;
-        state.drag.changed = true;
+        next.forEach(function (item) {
+          item.part.x = item.x;
+          item.part.y = item.y;
+        });
         onDocChange({ live: true });
       }
+      return;
+    }
+    if (state.marquee) {
+      state.marquee.x1 = w.x;
+      state.marquee.y1 = w.y;
+      if (Math.abs(e.clientX - state.marquee.sx) + Math.abs(e.clientY - state.marquee.sy) > 4) state.marquee.moved = true;
+      renderCanvas();
       return;
     }
     if (state.pan) {
@@ -1464,13 +1684,38 @@
     if (!same || state.wiring || state.tool) renderCanvas();
   }
 
+  function finishMarquee() {
+    var box = state.marquee;
+    var hits, items;
+    state.marquee = null;
+    if (!box) return;
+    if (!box.moved) {
+      if (!box.add) {
+        state.sel = null;
+        state.wiring = null;
+      }
+      onDocChange();
+      return;
+    }
+    hits = partsInRect(box);
+    items = box.add ? box.base.slice() : [];
+    hits.forEach(function (id) { items.push({ kind: 'part', id: id }); });
+    setSelection(items);
+    state.wiring = null;
+    onDocChange();
+  }
+
   function onCanvasUp(e) {
     if (state.drag) {
       var moved = state.drag.undo;
+      var narrow = state.drag.narrow;
+      var group = state.drag.ids.length > 1;
       state.drag = null;
+      if (!moved && group && narrow) setSelection([{ kind: 'part', id: narrow }]);
       onDocChange(moved ? { inspector: false } : undefined);
-      $('#undo').disabled = !state.past.length;
+      disable('undo', !state.past.length);
     }
+    if (state.marquee) finishMarquee();
     if (state.pan) {
       var deselect = state.pan.deselect && !state.pan.moved;
       state.pan = null;
@@ -1497,7 +1742,7 @@
   }
 
   function onWindowUp(e) {
-    if (state.drag || state.pan) onCanvasUp(e);
+    if (state.drag || state.pan || state.marquee) onCanvasUp(e);
     if (!state.gesture) return;
     var g = state.gesture;
     state.gesture = null;
@@ -1505,10 +1750,17 @@
     var inside = e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
     if (g.moved && inside && g.type) {
       state.tool = g.type;
+      state.toolRef = g.ref || '';
       state.cursor = worldFromEvent(e);
       placeAt(state.cursor, false);
     } else if (!g.moved) {
-      state.tool = state.tool === g.type ? '' : g.type;
+      if (state.tool === g.type && (state.toolRef || '') === (g.ref || '')) {
+        state.tool = '';
+        state.toolRef = '';
+      } else {
+        state.tool = g.type;
+        state.toolRef = g.ref || '';
+      }
       syncPalette();
       renderCanvas();
       renderStatus();
@@ -1546,11 +1798,25 @@
   function texStatus(msg) {
     var node = $('#texStatus');
     if (node) node.textContent = msg || '';
+    var modal = $('#modal');
+    if (msg && modal && modal.hidden) toast(msg, 4200);
   }
 
   function currentTex() {
     var ta = $('#texArea');
     return ta ? ta.value : '';
+  }
+
+  function drawingTex() {
+    if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return null; }
+    return CircuiTikZ.toTex(state.doc, { style: state.tex.style, scope: state.tex.scope });
+  }
+
+  function downloadDrawingTex() {
+    var out = drawingTex();
+    if (!out || !out.tex) return;
+    download((active().name || 'schematic') + '.tex', out.tex, 'text/plain');
+    if (out.warnings && out.warnings.length) toast(out.warnings[0], 4200);
   }
 
   function rememberTexStyle() {
@@ -1622,16 +1888,25 @@
     return '';
   }
 
-  function downloadPdf() {
+  function setPdfButtons(disabled) {
+    ['texPdf', 'schPdf'].forEach(function (id) {
+      var btn = $('#' + id);
+      if (btn) btn.disabled = disabled;
+    });
+  }
+
+  function downloadPdf(raw) {
     if (state.tex.busy) return;
     if (typeof CircuiTikZ === 'undefined') { toast('circuitikz.js did not load'); return; }
     if (typeof fetch !== 'function') {
       texStatus('This browser cannot compile PDF here. Use Open on TeXLive.net.');
       return;
     }
-    var tex = CircuiTikZ.wrapDocument(currentTex());
+    var body = typeof raw === 'string' ? raw : currentTex();
+    if (!String(body || '').trim()) { toast('Nothing to export'); return; }
+    var tex = CircuiTikZ.wrapDocument(body);
     state.tex.busy = true;
-    $('#texPdf').disabled = true;
+    setPdfButtons(true);
     var t0 = Date.now();
     texStatus('Compiling on latex.ytotech.com (sends this TeX to a third-party server)...');
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1675,9 +1950,14 @@
       texStatus(msg + ' You can use Open on TeXLive.net instead.');
     }).then(function () {
       state.tex.busy = false;
-      var btn = $('#texPdf');
-      if (btn) btn.disabled = false;
+      setPdfButtons(false);
     });
+  }
+
+  function downloadDrawingPdf() {
+    var out = drawingTex();
+    if (!out || !out.tex) return;
+    downloadPdf(out.tex);
   }
 
   function openTexLive() {
@@ -1777,7 +2057,14 @@
     c.order.forEach(function (name) {
       try { Schematic.layout(c.modules[name]); } catch (err) { /* grid fallback */ }
     });
+    var keptTb = {};
+    state.doc.modules.forEach(function (m) {
+      if (m.tb) keptTb[m.name] = m.tb;
+    });
     var out = Design.fromCompiled(c, { externals: Design.externalStubs(src) });
+    out.doc.modules.forEach(function (m) {
+      if (!m.tb && keptTb[m.name]) m.tb = keptTb[m.name];
+    });
     pushUndo();
     state.doc = out.doc;
     state.notes = out.warnings || [];
@@ -1786,7 +2073,7 @@
     state.wiring = null;
     syncPalette();
     onDocChange();
-    requestAnimationFrame(fit);
+    if (state.aspect === 'schematic') requestAnimationFrame(fit);
     return true;
   }
 
@@ -1846,6 +2133,12 @@
       saveSoon();
     }, { passive: false });
     canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    canvas.addEventListener('dblclick', function (e) {
+      var partEl = e.target.closest && e.target.closest('[data-part]');
+      if (!partEl) return;
+      var part = partById(partEl.getAttribute('data-part'));
+      if (part && part.type === 'block' && part.ref) activateModule(part.ref);
+    });
 
     $('#pal').addEventListener('pointerdown', function (e) {
       var btn = e.target.closest && e.target.closest('button[data-type]');
@@ -1853,6 +2146,7 @@
       e.preventDefault();
       state.gesture = {
         type: btn.getAttribute('data-type'),
+        ref: btn.getAttribute('data-ref') || '',
         x: e.clientX,
         y: e.clientY,
         moved: false
@@ -1861,15 +2155,15 @@
     window.addEventListener('pointermove', onWindowMove);
     window.addEventListener('pointerup', onWindowUp);
 
-    $('#undo').addEventListener('click', undo);
-    $('#redo').addEventListener('click', redo);
-    $('#del').addEventListener('click', deleteSelection);
+    if ($('#undo')) $('#undo').addEventListener('click', undo);
+    if ($('#redo')) $('#redo').addEventListener('click', redo);
+    if ($('#del')) $('#del').addEventListener('click', deleteSelection);
     $('#fit').addEventListener('click', fit);
     $('#zin').addEventListener('click', function () { zoomBy(1.12); });
     $('#zout').addEventListener('click', function () { zoomBy(1 / 1.12); });
     $('#zoom').addEventListener('click', function () { zoomAround(1); });
-    $('#preview').addEventListener('click', openPreview);
-    $('#imp').addEventListener('click', openImport);
+    if ($('#preview')) $('#preview').addEventListener('click', openPreview);
+    if ($('#imp')) $('#imp').addEventListener('click', openImport);
     $('#sheetClose').addEventListener('click', closeSheet);
     $('#modal').addEventListener('pointerdown', function (e) { if (e.target === $('#modal')) closeSheet(); });
     $('#sheetMod').addEventListener('change', function () { drawPreview($('#sheetMod').value); });
@@ -1920,34 +2214,25 @@
     }
     if ($('#texStyle')) $('#texStyle').addEventListener('change', function () { applyTexOpt('style'); });
     if ($('#texScope')) $('#texScope').addEventListener('change', function () { applyTexOpt('scope'); });
-    $('#copy').addEventListener('click', function () {
-      var box = $('#verilog');
-      var text = box ? box.value : '';
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { toast('Copied Verilog'); }, function () {
-          box.focus();
-          box.select();
-          toast('Select the text and copy it');
-        });
-      } else {
-        box.focus();
-        box.select();
-        try { document.execCommand('copy'); toast('Copied Verilog'); }
-        catch (err) { toast('Select the text and copy it'); }
-      }
+    if ($('#copy') && $('#verilog')) $('#copy').addEventListener('click', function () {
+      copyText($('#verilog').value);
     });
-    $('#exp').addEventListener('click', function () {
+    if ($('#exp')) $('#exp').addEventListener('click', function () {
       var name = (active().name || 'schematic') + '.v';
       download(name, state.report ? state.report.verilog : '', 'text/plain');
     });
-    $('#save').addEventListener('click', function () {
-      download((active().name || 'schematic') + '.json', JSON.stringify({ doc: state.doc, view: state.view }, null, 2), 'application/json');
+    if ($('#save')) $('#save').addEventListener('click', function () {
+      saveNow();
+      toast('Saved in the project');
     });
-    $('#openSim').addEventListener('click', function () {
+    if ($('#openSim')) $('#openSim').addEventListener('click', function () { openSimulator('vcd'); });
+    if ($('#exCollapse')) $('#exCollapse').addEventListener('click', function () {
+      document.body.classList.toggle('explorer-collapsed');
+      $('#exCollapse').textContent = document.body.classList.contains('explorer-collapsed') ? '\u203a' : '\u2039';
       try {
-        localStorage.setItem('vsch-from-designer', state.report ? state.report.verilog : '');
-        window.open('verilog.html', '_blank');
-      } catch (err) { toast('Could not open the simulator'); }
+        localStorage.setItem('vsch-explorer-collapsed', document.body.classList.contains('explorer-collapsed') ? '1' : '0');
+      } catch (err) { /* ignore */ }
+      if (state.aspect === 'schematic') requestAnimationFrame(function () { renderCanvas(); });
     });
     $('#file').addEventListener('change', function () {
       var file = $('#file').files && $('#file').files[0];
@@ -1957,7 +2242,7 @@
       reader.onload = function () { openFileText(String(reader.result || ''), file.name); };
       reader.readAsText(file);
     });
-    $('#examples').addEventListener('change', function () {
+    if ($('#examples')) $('#examples').addEventListener('change', function () {
       var name = $('#examples').value;
       $('#examples').value = '';
       if (!name) return;
@@ -1982,18 +2267,25 @@
       renderIssues();
       renderStatus();
       renderTabs();
+      if (state.aspect === 'icon') renderAspectPane();
       saveSoon();
     });
     modname.addEventListener('blur', function () {
       commitIfChanged(nameBefore);
       nameBefore = null;
-      $('#undo').disabled = !state.past.length;
+      disable('undo', !state.past.length);
       onDocChange();
     });
 
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
         if (!$('#modal').hidden) { closeSheet(); return; }
+        if (state.marquee) {
+          state.marquee = null;
+          renderCanvas();
+          renderStatus();
+          return;
+        }
         state.tool = '';
         state.wiring = null;
         state.gesture = null;
@@ -2021,9 +2313,15 @@
       } else if ((e.ctrlKey || e.metaKey) && key === 'd') {
         e.preventDefault();
         duplicate();
+      } else if ((e.ctrlKey || e.metaKey) && key === 'a') {
+        if (state.aspect !== 'schematic' || !$('#modal').hidden) return;
+        e.preventDefault();
+        setSelection((active().parts || []).map(function (p) { return { kind: 'part', id: p.id }; }));
+        onDocChange();
       } else if ((e.ctrlKey || e.metaKey) && key === 's') {
         e.preventDefault();
-        download((active().name || 'schematic') + '.json', JSON.stringify({ doc: state.doc, view: state.view }, null, 2), 'application/json');
+        saveNow();
+        toast('Saved in the project');
       } else if (key === 'f') fit();
       else if (key === '=' || key === '+') zoomBy(1.12);
       else if (key === '-' || key === '_') zoomBy(1 / 1.12);
@@ -2042,33 +2340,530 @@
     });
   }
 
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text || '').then(function () { toast('Copied'); }, function () { toast('Select the text and copy it'); });
+    } else toast('Select the text and copy it');
+  }
+
+  function moduleFileName() {
+    var mod = active();
+    var lab = state.report && state.report.labels && mod && state.report.labels[mod.id];
+    return (lab && lab.vname) || (mod && mod.name) || 'module';
+  }
+
+  function closedFolders() {
+    try {
+      var raw = localStorage.getItem('vsch-explorer-folders');
+      if (raw) return JSON.parse(raw) || {};
+    } catch (err) { /* ignore */ }
+    return {};
+  }
+
+  function renderProjectModules() {
+    var host = $('#modpal');
+    var label = $('#modpalLabel');
+    if (!host || !state.doc) return;
+    clearNode(host);
+    var mods = state.doc.modules.filter(function (m) { return m.id !== state.doc.active; });
+    if (label) label.hidden = !mods.length;
+    host.hidden = !mods.length;
+    mods.forEach(function (m) {
+      var b = el('button', { type: 'button', class: 'pi', 'data-type': 'block', 'data-ref': m.id }, host);
+      b.innerHTML = icon('block');
+      b.appendChild(document.createTextNode(m.name || 'module'));
+    });
+    syncPalette();
+  }
+
+  function renderExplorer() {
+    if (!window.Explorer || !state.doc) return;
+    var project = state.projectId && window.Workspace ? Workspace.project(state.projectId) : null;
+    var link = $('#exProject');
+    if (link) link.textContent = project ? project.name : 'Project';
+    document.title = (project ? project.name + ' — ' : '') + moduleFileName();
+    Explorer.render($('#exbody'), {
+      moduleName: moduleFileName(),
+      active: state.aspect,
+      closed: closedFolders(),
+      onToggle: function (folder, shut) {
+        var map = closedFolders();
+        map[folder] = !!shut;
+        try { localStorage.setItem('vsch-explorer-folders', JSON.stringify(map)); } catch (err) { /* ignore */ }
+      },
+      onOpen: showAspect
+    });
+    Explorer.hierarchy($('#exHier'), {
+      deps: window.Workspace ? Workspace.moduleDeps(state.doc) : {},
+      usedBy: window.Workspace ? Workspace.usedBy(state.doc) : {},
+      names: window.Workspace ? Workspace.names(state.doc) : {},
+      active: state.doc.active,
+      onOpen: activateModule
+    });
+  }
+
+  function setAspectChrome(title, stat) {
+    $('#aspectTitle').textContent = title || '';
+    $('#aspectStat').textContent = stat || '';
+    var extra = $('#aspectExtra');
+    clearNode(extra);
+    return extra;
+  }
+
+  function drawIcon(mod) {
+    var ports = (mod.parts || []).filter(function (p) { return p.type === 'in' || p.type === 'out'; })
+      .slice().sort(function (a, b) { return a.y - b.y || a.x - b.x; });
+    var ins = [];
+    var outs = [];
+    ports.forEach(function (p) { (p.type === 'in' ? ins : outs).push(p); });
+    var n = Math.max(ins.length, outs.length, 1);
+    var w = 240;
+    var h = Math.max(88, 40 + n * 28);
+    var svg = svgEl('svg', { width: String(w + 80), height: String(h + 48), viewBox: '0 0 ' + (w + 80) + ' ' + (h + 48) });
+    var g = svgEl('g', { transform: 'translate(40 24)' }, svg);
+    svgEl('rect', { x: 0, y: 0, width: w, height: h, rx: 8, fill: '#fff', stroke: '#243044', 'stroke-width': 1.6 }, g);
+    svgText({ x: w / 2, y: 22, 'text-anchor': 'middle', 'font-size': 14, 'font-family': 'Consolas, monospace', fill: '#152033' }, mod.name || 'module', g);
+    function sidePins(list, side) {
+      list.forEach(function (p, i) {
+        var y = (i + 1) * h / (list.length + 1);
+        var x = side === 'l' ? 0 : w;
+        svgEl('line', {
+          x1: x + (side === 'l' ? -18 : 0), y1: y, x2: x + (side === 'l' ? 0 : 18), y2: y,
+          stroke: '#243044', 'stroke-width': 1.4
+        }, g);
+        svgEl('circle', { cx: x, cy: y, r: 3.2, fill: '#243044' }, g);
+        svgText({
+          x: side === 'l' ? 12 : w - 12,
+          y: y + 4,
+          'text-anchor': side === 'l' ? 'start' : 'end',
+          'font-size': 12,
+          'font-family': 'Consolas, monospace',
+          fill: side === 'l' ? '#1d6fe0' : '#0f7a45'
+        }, p.name || '', g);
+      });
+    }
+    sidePins(ins, 'l');
+    sidePins(outs, 'r');
+    return svg;
+  }
+
+  function generatedVerilog() {
+    if (state.report && state.report.verilog != null) return state.report.verilog;
+    try { return Design.toVerilog(state.doc); } catch (err) { return ''; }
+  }
+
+  function loadVerilogBuffer() {
+    var generated = generatedVerilog();
+    var project = state.projectId && window.Workspace ? Workspace.project(state.projectId) : null;
+    if (project && (project.verilogPinned || (project.simVerilog && String(project.simVerilog).length))) {
+      state.verilogText = project.simVerilog || '';
+      if (!project.verilogPinned) Workspace.setSimVerilog(project.id, state.verilogText);
+    } else {
+      state.verilogText = generated;
+      if (project) Workspace.setSimVerilog(project.id, state.verilogText);
+    }
+  }
+
+  function bareGenerated(tb) {
+    var text = String(tb || '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
+    return /initial begin\n    \$dumpfile\("dump\.vcd"\);\n    \$dumpvars\(0, tb\);\n    #10 \$finish;\n  end\nendmodule$/.test(text);
+  }
+
+  function seedTestbenches() {
+    if (!state.doc) return;
+    state.doc.modules.forEach(function (m) {
+      if (m.tb != null && !bareGenerated(m.tb)) return;
+      var next = Design.tbTemplate(state.doc, m.id);
+      if (next) m.tb = next;
+    });
+  }
+
+  function verilogTextNow() {
+    var box = $('#aspectVerilog');
+    if (box) state.verilogText = box.value;
+    return state.verilogText || '';
+  }
+
+  function setVerilogBuffer(text) {
+    state.verilogText = text == null ? '' : String(text);
+    if (state.projectId && window.Workspace) Workspace.setSimVerilog(state.projectId, state.verilogText);
+    var box = $('#aspectVerilog');
+    if (box && box.value !== state.verilogText) box.value = state.verilogText;
+    refreshVerilogStat();
+  }
+
+  function refreshVerilogStat() {
+    var stat = $('#aspectStat');
+    if (!stat || state.aspect !== 'verilog') return;
+    var text = state.verilogText || '';
+    var lines = text ? text.replace(/\n$/, '').split('\n').length : 0;
+    stat.textContent = lines ? (lines + (lines === 1 ? ' line' : ' lines') + ' · every module') : 'every module';
+  }
+
+  function sameText(a, b) {
+    return String(a || '').replace(/\s+$/, '') === String(b || '').replace(/\s+$/, '');
+  }
+
+  function updateVerilogFromSchematic() {
+    var next = generatedVerilog();
+    var cur = verilogTextNow();
+    if (sameText(cur, next)) { toast('Verilog already matches the schematic'); return; }
+    if (cur.trim() && !window.confirm('Replace the Verilog editor with the schematic?')) return;
+    setVerilogBuffer(next);
+    toast('Verilog updated from the schematic');
+  }
+
+  function updateTbFromSchematic() {
+    var mod = active();
+    if (!mod) return;
+    var next = Design.tbTemplate(state.doc, mod.id);
+    var cur = mod.tb || '';
+    if (sameText(cur, next)) { toast('Testbench already matches the schematic'); return; }
+    if (cur.trim() && !window.confirm('Replace the testbench with one generated from the schematic?')) return;
+    mod.tb = next;
+    var box = $('#aspectTb');
+    if (box) box.value = next;
+    saveSoon();
+    toast('Testbench updated from the schematic');
+  }
+
+  function applyVerilogToSchematic() {
+    var text = verilogTextNow();
+    if (!String(text).trim()) { toast('The Verilog editor is empty'); return; }
+    var current = generatedVerilog();
+    if (sameText(text, current)) { toast('Schematic already matches the Verilog'); return; }
+    var hasParts = state.doc.modules.some(function (m) { return (m.parts || []).length; });
+    if (hasParts && !window.confirm('Replace the schematic with the Verilog editor?')) return;
+    if (!importVerilog(text)) return;
+    toast('Schematic updated from Verilog');
+  }
+
+  function syncButton(host, label, title, primary, fn) {
+    var b = el('button', { type: 'button', class: primary ? 'primary' : 'ghost', title: title, text: label }, host);
+    b.addEventListener('click', fn);
+    return b;
+  }
+
+  function renderSync() {
+    var host = $('#syncActions');
+    if (!host) return;
+    clearNode(host);
+    if (state.aspect === 'schematic') {
+      syncButton(host, 'Download .tex', 'Download this schematic as CircuiTikZ', false, downloadDrawingTex);
+      var pdf = syncButton(host, 'Download PDF', 'Compile with pdflatex on latex.ytotech.com and download the PDF. Sends this TeX to a third-party server.', false, downloadDrawingPdf);
+      pdf.id = 'schPdf';
+      if (state.tex.busy) pdf.disabled = true;
+      syncButton(host, 'Apply from Verilog', 'Replace the schematic with the Verilog editor', false, applyVerilogToSchematic);
+      syncButton(host, 'Update Verilog', 'Copy this schematic into the Verilog editor', true, updateVerilogFromSchematic);
+    } else if (state.aspect === 'verilog') {
+      syncButton(host, 'Update from schematic', 'Replace this Verilog with the schematic', false, updateVerilogFromSchematic);
+      syncButton(host, 'Apply to schematic', 'Replace the schematic with this Verilog', true, applyVerilogToSchematic);
+    } else if (state.aspect === 'testbench') {
+      syncButton(host, 'Update from schematic', 'Replace this testbench with stimulus for every input combination', false, updateTbFromSchematic);
+      syncButton(host, 'Apply Verilog to schematic', 'Replace the schematic with the Verilog editor', true, applyVerilogToSchematic);
+    } else if (state.aspect === 'icon') {
+      el('span', { class: 'syncnote', text: 'Updates when the schematic changes' }, host);
+    }
+  }
+
+  function downloadTextFile(name, text, type) {
+    download(name, text || '', type || 'text/plain');
+  }
+
+  function refreshVcd(part) {
+    var textBtn = $('#vcdModeText');
+    var waveBtn = $('#vcdModeWave');
+    var textPane = $('#vcdText');
+    var logPane = $('#vcdLog');
+    var wavePane = $('#vcdWave');
+    var dlText = $('#vcdDlText');
+    var dlWave = $('#vcdDlWave');
+    var meta = $('#vcdMeta');
+    var gen = $('#vcdGen');
+    if (textBtn) textBtn.classList.toggle('on', state.vcd.mode !== 'wave');
+    if (waveBtn) waveBtn.classList.toggle('on', state.vcd.mode === 'wave');
+    if (textPane) {
+      textPane.hidden = state.vcd.mode === 'wave';
+      textPane.textContent = state.vcd.text || state.vcd.log || 'Generate a VCD from the Verilog and this module\u2019s testbench.';
+    }
+    if (logPane) {
+      var showLog = state.vcd.mode !== 'wave' && !!state.vcd.text && !!state.vcd.log;
+      logPane.hidden = !showLog;
+      logPane.textContent = state.vcd.log || '';
+    }
+    if (wavePane) wavePane.hidden = state.vcd.mode !== 'wave';
+    if (dlText) dlText.disabled = !state.vcd.text;
+    if (dlWave) dlWave.disabled = !state.vcd.model;
+    if (gen) gen.disabled = !!state.vcd.running;
+    if (state.aspect === 'vcd') {
+      var stat = state.vcd.running ? 'Generating\u2026' : (state.vcd.model ? 'VCD ready' : '');
+      setAspectChrome(moduleFileName() + '.vcd', stat);
+    }
+    if (state.vcd.mode === 'wave' && window.Sim && $('#vcdPlot')) {
+      if (part !== 'wave') Sim.renderSigs($('#vcdSigs'), state.vcd, function (kind) {
+        refreshVcd(kind === 'check' ? 'wave' : '');
+      });
+      Sim.renderWave($('#vcdPlot'), state.vcd);
+      if (meta) meta.textContent = [Sim.markerLabel(state.vcd), Sim.rangeLabel(state.vcd)].filter(Boolean).join(' \u00b7 ');
+    } else if (meta) meta.textContent = '';
+  }
+
+  async function generateVcd() {
+    if (!window.Sim) { toast('Simulator did not load'); return; }
+    var mod = active();
+    state.vcd.running = true;
+    state.vcd.log = 'Generating\u2026';
+    refreshVcd();
+    try {
+      var design = verilogTextNow();
+      var tb = mod && mod.tb != null ? mod.tb : Design.tbTemplate(state.doc, mod.id);
+      var genSel = $('#vcdGenSel');
+      var generation = genSel ? genSel.value : '2005';
+      try { localStorage.setItem('vsch-gen', generation); } catch (err) { /* ignore */ }
+      var result = await Sim.run(design, tb, generation);
+      state.vcd.log = result.log || '';
+      state.vcd.text = result.vcd || '';
+      state.vcd.model = result.vcd ? Sim.parseVCD(result.vcd) : null;
+      state.vcd.selOrder = state.vcd.model ? state.vcd.model.order.slice() : [];
+      state.vcd.view0 = 0;
+      state.vcd.viewSpan = null;
+      state.vcd.curT = null;
+      state.vcd.mode = result.vcd ? 'wave' : 'text';
+      if (!result.ok) toast(result.vcd ? 'VCD ready' : 'No VCD was generated');
+    } catch (err) {
+      state.vcd.log = (err && err.message) ? err.message : String(err);
+      state.vcd.text = '';
+      state.vcd.model = null;
+      state.vcd.mode = 'text';
+      toast('Simulation failed');
+    } finally {
+      state.vcd.running = false;
+      refreshVcd();
+    }
+  }
+
+  function renderVcdPane() {
+    var host = $('#aspectHost');
+    host.style.overflow = 'hidden';
+    if (state.aspectBuilt !== 'vcd') {
+      clearNode(host);
+      var tools = el('div', { class: 'vcd-tools' }, host);
+      var gen = el('button', { type: 'button', class: 'primary', id: 'vcdGen', text: 'Generate' }, tools);
+      var genSel = el('select', { id: 'vcdGenSel', class: 'ex', title: 'Language generation' }, tools);
+      [['2005', 'Verilog-2005'], ['2009', 'Verilog-2009'], ['2012', 'SystemVerilog-2012']].forEach(function (pair) {
+        el('option', { value: pair[0], text: pair[1] }, genSel);
+      });
+      try {
+        var savedGen = localStorage.getItem('vsch-gen');
+        if (savedGen) genSel.value = savedGen;
+      } catch (err) { /* keep 2005 */ }
+      var textBtn = el('button', { type: 'button', class: 'mode', id: 'vcdModeText', text: 'Text' }, tools);
+      var waveBtn = el('button', { type: 'button', class: 'mode', id: 'vcdModeWave', text: 'Waveform' }, tools);
+      var dlText = el('button', { type: 'button', id: 'vcdDlText', text: 'Download .vcd' }, tools);
+      var dlWave = el('button', { type: 'button', id: 'vcdDlWave', text: 'Download waveform.svg' }, tools);
+      el('span', { id: 'vcdMeta', class: 'vcd-meta' }, tools);
+      var logPane = el('pre', { id: 'vcdLog', class: 'vcd-log' }, host);
+      logPane.hidden = true;
+      el('pre', { id: 'vcdText', class: 'vcd-text' }, host);
+      var wave = el('div', { id: 'vcdWave', class: 'vcd-wave' }, host);
+      el('aside', { id: 'vcdSigs', class: 'vcd-sigs' }, wave);
+      var plot = el('div', { id: 'vcdPlot', class: 'vcd-plot' }, wave);
+      gen.addEventListener('click', function () { generateVcd(); });
+      textBtn.addEventListener('click', function () { state.vcd.mode = 'text'; refreshVcd(); });
+      waveBtn.addEventListener('click', function () { state.vcd.mode = 'wave'; refreshVcd(); });
+      dlText.addEventListener('click', function () {
+        if (!state.vcd.text) { toast('Generate a VCD first'); return; }
+        downloadTextFile('dump.vcd', state.vcd.text, 'text/plain');
+      });
+      dlWave.addEventListener('click', function () {
+        if (!state.vcd.model || !window.Sim) { toast('Generate a waveform first'); return; }
+        var prevSpan = state.vcd.viewSpan;
+        var prev0 = state.vcd.view0;
+        var svg = Sim.waveformSvg(state.vcd, 960);
+        state.vcd.viewSpan = prevSpan;
+        state.vcd.view0 = prev0;
+        if (state.vcd.mode === 'wave') refreshVcd('wave');
+        if (!svg) { toast('Tick at least one signal, then download again'); return; }
+        downloadTextFile('waveform.svg', svg, 'image/svg+xml');
+      });
+      if (window.Sim) Sim.bindWave(plot, state.vcd, function () { refreshVcd('wave'); });
+      state.aspectBuilt = 'vcd';
+    }
+    refreshVcd();
+  }
+
+  function renderAspectPane() {
+    var host = $('#aspectHost');
+    if (!host) return;
+    if (state.aspect === 'schematic') {
+      state.aspectBuilt = '';
+      host.style.overflow = '';
+      return;
+    }
+    var mod = active();
+    if (!mod) return;
+    if (state.aspect !== 'vcd') host.style.overflow = 'auto';
+    if (state.aspect === 'verilog') {
+      var text = state.verilogText || '';
+      var lines = text ? text.replace(/\n$/, '').split('\n').length : 0;
+      setAspectChrome(moduleFileName() + '.v', (lines ? lines + (lines === 1 ? ' line' : ' lines') + ' · ' : '') + 'every module in this project');
+      if (state.aspectBuilt !== 'verilog') {
+        clearNode(host);
+        var ta = el('textarea', { id: 'aspectVerilog', class: 'editor-full', spellcheck: 'false' }, host);
+        ta.addEventListener('input', function () {
+          state.verilogText = ta.value;
+          if (state.projectId && window.Workspace) Workspace.setSimVerilog(state.projectId, ta.value);
+          refreshVerilogStat();
+        });
+        ta.addEventListener('keydown', function (e) {
+          if (e.key !== 'Tab') return;
+          e.preventDefault();
+          var s = ta.selectionStart;
+          var n = ta.selectionEnd;
+          ta.value = ta.value.slice(0, s) + '  ' + ta.value.slice(n);
+          ta.selectionStart = ta.selectionEnd = s + 2;
+          state.verilogText = ta.value;
+          if (state.projectId && window.Workspace) Workspace.setSimVerilog(state.projectId, ta.value);
+        });
+        ta.value = text;
+        state.aspectBuilt = 'verilog';
+      }
+      return;
+    }
+    if (state.aspect === 'testbench') {
+      var key = 'testbench:' + mod.id;
+      var shown = mod.tb != null ? mod.tb : Design.tbTemplate(state.doc, mod.id);
+      setAspectChrome(moduleFileName() + '_tb.v', 'Testbench for this module');
+      if (state.aspectBuilt !== key) {
+        clearNode(host);
+        var box = el('textarea', { id: 'aspectTb', class: 'editor-full', spellcheck: 'false' }, host);
+        box.addEventListener('input', function () {
+          active().tb = box.value;
+          saveSoon();
+        });
+        box.addEventListener('keydown', function (e) {
+          if (e.key !== 'Tab') return;
+          e.preventDefault();
+          var s = box.selectionStart;
+          var n = box.selectionEnd;
+          box.value = box.value.slice(0, s) + '  ' + box.value.slice(n);
+          box.selectionStart = box.selectionEnd = s + 2;
+          active().tb = box.value;
+          saveSoon();
+        });
+        box.value = shown;
+        state.aspectBuilt = key;
+      } else if (document.activeElement !== $('#aspectTb') && $('#aspectTb')) {
+        $('#aspectTb').value = shown;
+      }
+      return;
+    }
+    if (state.aspect === 'icon') {
+      setAspectChrome(moduleFileName() + '.ico', 'Updates when the schematic changes');
+      clearNode(host);
+      var stage = el('div', { class: 'icon-stage' }, host);
+      stage.appendChild(drawIcon(mod));
+      state.aspectBuilt = 'icon:' + mod.id;
+      return;
+    }
+    if (state.aspect === 'vcd') renderVcdPane();
+  }
+
+  function showAspect(id) {
+    if (id === 'console' || id === 'viewer') id = 'schematic';
+    if (id === 'waveform') id = 'vcd';
+    state.aspect = id || 'schematic';
+    var drawing = state.aspect === 'schematic';
+    var row = $('#aspectSchematic');
+    var other = $('#aspectOther');
+    if (row) row.hidden = !drawing;
+    if (other) other.hidden = drawing;
+    renderExplorer();
+    renderSync();
+    renderAspectPane();
+    if (drawing) requestAnimationFrame(function () { renderCanvas(); });
+  }
+
+  function activateModule(id) {
+    if (!state.doc || !Design.moduleById(state.doc, id)) return;
+    if (state.doc.active !== id) {
+      state.doc.active = id;
+      state.sel = null;
+      state.wiring = null;
+      state.tool = '';
+      state.toolRef = '';
+      syncPalette();
+      onDocChange();
+      if (state.aspect === 'schematic') requestAnimationFrame(fit);
+      return;
+    }
+    if (state.aspect !== 'schematic') showAspect('schematic');
+  }
+
+  function openSimulator() {
+    showAspect('vcd');
+  }
+
   function boot() {
     buildPalette();
     fillExamples();
     bind();
-    var saved = null;
-    try {
-      var raw = localStorage.getItem(STORE);
-      if (raw) saved = JSON.parse(raw);
-    } catch (err) { saved = null; }
-    if (saved && saved.doc && saved.doc.modules) {
-      state.doc = saved.doc;
-      Design.prune(state.doc);
-      if (saved.view && typeof saved.view.z === 'number') state.view = saved.view;
-    } else if (saved && saved.modules) {
-      state.doc = saved;
-      Design.prune(state.doc);
-    } else {
-      state.doc = Design.example('half');
+    var params = new URLSearchParams(window.location.search);
+    var loadedView = false;
+    if (window.Workspace) {
+      var data = Workspace.ensure(Design);
+      var picked = Workspace.project(params.get('project')) || Workspace.project(data.activeProject) || Workspace.current();
+      if (picked) {
+        state.projectId = picked.id;
+        Workspace.setActive(picked.id);
+        state.doc = picked.doc;
+        Design.prune(state.doc);
+        if (picked.view && typeof picked.view.z === 'number') {
+          state.view = picked.view;
+          loadedView = true;
+        }
+        var mid = params.get('module');
+        if (mid && Design.moduleById(state.doc, mid)) state.doc.active = mid;
+      }
     }
+    if (!state.doc) {
+      var saved = null;
+      try {
+        var raw = localStorage.getItem(STORE);
+        if (raw) saved = JSON.parse(raw);
+      } catch (err) { saved = null; }
+      if (saved && saved.doc && saved.doc.modules) {
+        state.doc = saved.doc;
+        Design.prune(state.doc);
+        if (saved.view && typeof saved.view.z === 'number') {
+          state.view = saved.view;
+          loadedView = true;
+        }
+      } else if (saved && saved.modules) {
+        state.doc = saved;
+        Design.prune(state.doc);
+      } else state.doc = Design.example('half');
+    }
+    var wanted = params.get('aspect') || 'schematic';
+    if (wanted === 'waveform' || wanted === 'console') wanted = 'vcd';
+    if (wanted === 'viewer') wanted = 'schematic';
+    var localAspect = { schematic: 1, icon: 1, verilog: 1, testbench: 1, vcd: 1 };
+    state.aspect = localAspect[wanted] ? wanted : 'schematic';
+    try {
+      if (localStorage.getItem('vsch-explorer-collapsed') === '1') {
+        document.body.classList.add('explorer-collapsed');
+        if ($('#exCollapse')) $('#exCollapse').textContent = '\u203a';
+      }
+    } catch (err2) { /* ignore */ }
     try {
       var texStyle = localStorage.getItem('verilog-schematic-designer-tex');
       if (texStyle === 'european' || texStyle === 'ieeestd' || texStyle === 'american') state.tex.style = texStyle;
-    } catch (err2) { /* keep american */ }
+    } catch (err3) { /* keep american */ }
     syncPalette();
     onDocChange();
+    showAspect(state.aspect);
     requestAnimationFrame(function () {
-      if (!saved || !saved.view) fit();
+      if (state.aspect === 'schematic' && !loadedView) fit();
     });
   }
 
